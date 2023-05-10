@@ -93,7 +93,7 @@ db_list =
 
 ### How bloated are my tables?
 
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT current_database(), schemaname, tblname, bs*tblpages AS real_size,\n  (tblpages-est_tblpages)*bs AS extra_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages > 0\n    THEN 100 * (tblpages - est_tblpages)/tblpages::float\n    ELSE 0\n  END AS extra_pct, fillfactor,\n  CASE WHEN tblpages - est_tblpages_ff > 0\n    THEN (tblpages-est_tblpages_ff)*bs\n    ELSE 0\n  END AS bloat_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages_ff > 0\n    THEN 100 * (tblpages - est_tblpages_ff)/tblpages::float\n    ELSE 0\n  END AS bloat_pct, is_na\n  -- , tpl_hdr_size, tpl_data_size, (pst).free_percent + (pst).dead_tuple_percent AS real_frag -- (DEBUG INFO)\nFROM (\n  SELECT ceil( reltuples / ( (bs-page_hdr)/tpl_size ) ) + ceil( toasttuples / 4 ) AS est_tblpages,\n    ceil( reltuples / ( (bs-page_hdr)*fillfactor/(tpl_size*100) ) ) + ceil( toasttuples / 4 ) AS est_tblpages_ff,\n    tblpages, fillfactor, bs, tblid, schemaname, tblname, heappages, toastpages, is_na\n    -- , tpl_hdr_size, tpl_data_size, pgstattuple(tblid) AS pst -- (DEBUG INFO)\n  FROM (\n    SELECT\n      ( 4 + tpl_hdr_size + tpl_data_size + (2*ma)\n        - CASE WHEN tpl_hdr_size%ma = 0 THEN ma ELSE tpl_hdr_size%ma END\n        - CASE WHEN ceil(tpl_data_size)::int%ma = 0 THEN ma ELSE ceil(tpl_data_size)::int%ma END\n      ) AS tpl_size, bs - page_hdr AS size_per_block, (heappages + toastpages) AS tblpages, heappages,\n      toastpages, reltuples, toasttuples, bs, page_hdr, tblid, schemaname, tblname, fillfactor, is_na\n      -- , tpl_hdr_size, tpl_data_size\n    FROM (\n      SELECT\n        tbl.oid AS tblid, ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,\n        tbl.relpages AS heappages, coalesce(toast.relpages, 0) AS toastpages,\n        coalesce(toast.reltuples, 0) AS toasttuples,\n        coalesce(substring(\n          array_to_string(tbl.reloptions, ' ')\n          FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,\n        current_setting('block_size')::numeric AS bs,\n        CASE WHEN version()~'mingw32' OR version()~'64-bit|x86_64|ppc64|ia64|amd64' THEN 8 ELSE 4 END AS ma,\n        24 AS page_hdr,\n        23 + CASE WHEN MAX(coalesce(s.null_frac,0)) > 0 THEN ( 7 + count(s.attname) ) / 8 ELSE 0::int END\n           + CASE WHEN bool_or(att.attname = 'oid' and att.attnum < 0) THEN 4 ELSE 0 END AS tpl_hdr_size,\n        sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 0) ) AS tpl_data_size,\n        bool_or(att.atttypid = 'pg_catalog.name'::regtype)\n          OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na\n      FROM pg_attribute AS att\n        JOIN pg_class AS tbl ON att.attrelid = tbl.oid\n        JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace\n        LEFT JOIN pg_stats AS s ON s.schemaname=ns.nspname\n          AND s.tablename = tbl.relname AND s.inherited=false AND s.attname=att.attname\n        LEFT JOIN pg_class AS toast ON tbl.reltoastrelid = toast.oid\n      WHERE NOT att.attisdropped\n        AND tbl.relkind in ('r','m')\n      GROUP BY 1,2,3,4,5,6,7,8,9,10\n      ORDER BY 2,3\n    ) AS s\n  ) AS s2\n) AS s3\n-- WHERE NOT is_na\n--   AND tblpages*((pst).free_percent + (pst).dead_tuple_percent)::float4/100 >= 1\nWHERE schemaname NOT IN ('information_schema', 'pg_catalog')\nORDER BY extra_pct DESC;","result_variable":"table_bloat","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT current_database(), schemaname, tblname, bs*tblpages AS real_size,\n  (tblpages-est_tblpages)*bs AS extra_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages > 0\n    THEN 100 * (tblpages - est_tblpages)/tblpages::float\n    ELSE 0\n  END AS extra_pct, fillfactor,\n  CASE WHEN tblpages - est_tblpages_ff > 0\n    THEN (tblpages-est_tblpages_ff)*bs\n    ELSE 0\n  END AS bloat_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages_ff > 0\n    THEN 100 * (tblpages - est_tblpages_ff)/tblpages::float\n    ELSE 0\n  END AS bloat_pct, is_na\n  -- , tpl_hdr_size, tpl_data_size, (pst).free_percent + (pst).dead_tuple_percent AS real_frag -- (DEBUG INFO)\nFROM (\n  SELECT ceil( reltuples / ( (bs-page_hdr)/tpl_size ) ) + ceil( toasttuples / 4 ) AS est_tblpages,\n    ceil( reltuples / ( (bs-page_hdr)*fillfactor/(tpl_size*100) ) ) + ceil( toasttuples / 4 ) AS est_tblpages_ff,\n    tblpages, fillfactor, bs, tblid, schemaname, tblname, heappages, toastpages, is_na\n    -- , tpl_hdr_size, tpl_data_size, pgstattuple(tblid) AS pst -- (DEBUG INFO)\n  FROM (\n    SELECT\n      ( 4 + tpl_hdr_size + tpl_data_size + (2*ma)\n        - CASE WHEN tpl_hdr_size%ma = 0 THEN ma ELSE tpl_hdr_size%ma END\n        - CASE WHEN ceil(tpl_data_size)::int%ma = 0 THEN ma ELSE ceil(tpl_data_size)::int%ma END\n      ) AS tpl_size, bs - page_hdr AS size_per_block, (heappages + toastpages) AS tblpages, heappages,\n      toastpages, reltuples, toasttuples, bs, page_hdr, tblid, schemaname, tblname, fillfactor, is_na\n      -- , tpl_hdr_size, tpl_data_size\n    FROM (\n      SELECT\n        tbl.oid AS tblid, ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,\n        tbl.relpages AS heappages, coalesce(toast.relpages, 0) AS toastpages,\n        coalesce(toast.reltuples, 0) AS toasttuples,\n        coalesce(substring(\n          array_to_string(tbl.reloptions, ' ')\n          FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,\n        current_setting('block_size')::numeric AS bs,\n        CASE WHEN version()~'mingw32' OR version()~'64-bit|x86_64|ppc64|ia64|amd64' THEN 8 ELSE 4 END AS ma,\n        24 AS page_hdr,\n        23 + CASE WHEN MAX(coalesce(s.null_frac,0)) > 0 THEN ( 7 + count(s.attname) ) / 8 ELSE 0::int END\n           + CASE WHEN bool_or(att.attname = 'oid' and att.attnum < 0) THEN 4 ELSE 0 END AS tpl_hdr_size,\n        sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 0) ) AS tpl_data_size,\n        bool_or(att.atttypid = 'pg_catalog.name'::regtype)\n          OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na\n      FROM pg_attribute AS att\n        JOIN pg_class AS tbl ON att.attrelid = tbl.oid\n        JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace\n        LEFT JOIN pg_stats AS s ON s.schemaname=ns.nspname\n          AND s.tablename = tbl.relname AND s.inherited=false AND s.attname=att.attname\n        LEFT JOIN pg_class AS toast ON tbl.reltoastrelid = toast.oid\n      WHERE NOT att.attisdropped\n        AND tbl.relkind in ('r','m')\n      GROUP BY 1,2,3,4,5,6,7,8,9,10\n      ORDER BY 2,3\n    ) AS s\n  ) AS s2\n) AS s3\n-- WHERE NOT is_na\n--   AND tblpages*((pst).free_percent + (pst).dead_tuple_percent)::float4/100 >= 1\nWHERE\n schemaname NOT IN ('information_schema', 'pg_catalog')\nORDER BY extra_pct DESC;","result_variable":"table_bloat","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
 table_bloat =
@@ -159,7 +159,8 @@ table_bloat =
     ) AS s3
     -- WHERE NOT is_na
     --   AND tblpages*((pst).free_percent + (pst).dead_tuple_percent)::float4/100 >= 1
-    WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+    WHERE
+     schemaname NOT IN ('information_schema', 'pg_catalog')
     ORDER BY extra_pct DESC;
     """,
     []
@@ -174,6 +175,17 @@ VegaLite.new(width: 700, title: "Table Bloat")
 |> VegaLite.mark(:bar)
 |> VegaLite.encode_field(:x, "tblname", type: :nominal)
 |> VegaLite.encode_field(:y, "bloat_pct", type: :quantitative)
+```
+
+```elixir
+# IO.inspect(table_bloat)
+for row <- table_bloat.rows do
+  [_db, schema, table, _, _, pct, _, _, _, _] = row
+
+  if pct > 10 do
+    IO.puts("Repack the following tables #{schema}.#{table};")
+  end
+end
 ```
 
 ### How bloated are my indexes?
@@ -298,6 +310,19 @@ VegaLite.new(width: 700, title: "Index Bloat")
 |> VegaLite.mark(:bar)
 |> VegaLite.encode_field(:x, "idxname", type: :nominal)
 |> VegaLite.encode_field(:y, "bloat_pct", type: :quantitative)
+```
+
+### Suggested indexes to remove bloat from with examples
+
+```elixir
+# IO.inspect(index_bloat)
+for row <- index_bloat.rows do
+  [_db, schema, _table, index, _, _, idx_pct, _, _, _, _] = row
+
+  if idx_pct > 10 do
+    IO.puts("REINDEX INDEX CONCURRENTLY #{schema}.#{index};")
+  end
+end
 ```
 
 ## Relation Sizes
@@ -530,6 +555,17 @@ unused_indexes =
     """,
     []
   )
+```
+
+Here are sample DROP INDEX commands for each of your unused indexes.
+WARNING:  If this report was run right after restarting your database then the statistics may be off.  Wait for a bit before dropping any indexes you think are unused.
+
+```elixir
+# IO.inspect(unused_indexes)
+for row <- unused_indexes.rows do
+  [_table, index, _, _] = row
+  IO.puts("DROP INDEX #{index};")
+end
 ```
 
 ### Max Connections
