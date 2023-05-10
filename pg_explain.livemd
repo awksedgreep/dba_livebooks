@@ -1,0 +1,905 @@
+<!-- livebook:{"autosave_interval_s":60} -->
+
+# Explain DB PostgreSQL
+
+```elixir
+Mix.install([
+  {:kino_db, "~> 0.2.1"},
+  {:postgrex, "~> 0.16.3"},
+  {:kino_vega_lite, "~> 0.1.7"}
+])
+```
+
+## Basic DB Information
+
+<!-- livebook:{"attrs":{"database":"chinook","hostname":"localhost","password_secret":"","port":5432,"type":"postgres","use_ipv6":false,"username":"mark.cotner","variable":"conn"},"chunks":null,"kind":"Elixir.KinoDB.ConnectionCell","livebook_object":"smart_cell"} -->
+
+```elixir
+opts = [
+  hostname: "localhost",
+  port: 5432,
+  username: "mark.cotner",
+  password: "",
+  database: "chinook"
+]
+
+{:ok, conn} = Kino.start_child({Postgrex, opts})
+```
+
+### Metadata for Report
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Full Version
+
+The current database version is :
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT version()","result_variable":"db_version","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+db_version = Postgrex.query!(conn, "SELECT version()", [])
+```
+
+### Major and Minor Versions
+
+Extract major and minor versions from settings
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n left(setting, 2)::int AS major_version, \n right(setting, 3)::int AS minor_version \nFROM\n pg_settings \nWHERE\n name = 'server_version_num';","result_variable":"major_and_minor","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+major_and_minor =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     left(setting, 2)::int AS major_version, 
+     right(setting, 3)::int AS minor_version 
+    FROM
+     pg_settings 
+    WHERE
+     name = 'server_version_num';
+    """,
+    []
+  )
+```
+
+```elixir
+# IO.inspect(major_and_minor)
+[[major, minor]] = major_and_minor.rows
+
+if major <= 11 do
+  "Consider upgrading to at least PostgreSQL 12"
+else
+  "You're using a newish version"
+end
+```
+
+### Verify databases
+
+Is this the expected list of databases on your server and the expected number of connections?
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT datname, numbackends AS connections FROM pg_stat_database WHERE datname not in ('template0', 'template1', 'template2', 'postgres')","result_variable":"db_list","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+db_list =
+  Postgrex.query!(
+    conn,
+    "SELECT datname, numbackends AS connections FROM pg_stat_database WHERE datname not in ('template0', 'template1', 'template2', 'postgres')",
+    []
+  )
+```
+
+## Database Bloat
+
+### How bloated are my tables?
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT current_database(), schemaname, tblname, bs*tblpages AS real_size,\n  (tblpages-est_tblpages)*bs AS extra_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages > 0\n    THEN 100 * (tblpages - est_tblpages)/tblpages::float\n    ELSE 0\n  END AS extra_pct, fillfactor,\n  CASE WHEN tblpages - est_tblpages_ff > 0\n    THEN (tblpages-est_tblpages_ff)*bs\n    ELSE 0\n  END AS bloat_size,\n  CASE WHEN tblpages > 0 AND tblpages - est_tblpages_ff > 0\n    THEN 100 * (tblpages - est_tblpages_ff)/tblpages::float\n    ELSE 0\n  END AS bloat_pct, is_na\n  -- , tpl_hdr_size, tpl_data_size, (pst).free_percent + (pst).dead_tuple_percent AS real_frag -- (DEBUG INFO)\nFROM (\n  SELECT ceil( reltuples / ( (bs-page_hdr)/tpl_size ) ) + ceil( toasttuples / 4 ) AS est_tblpages,\n    ceil( reltuples / ( (bs-page_hdr)*fillfactor/(tpl_size*100) ) ) + ceil( toasttuples / 4 ) AS est_tblpages_ff,\n    tblpages, fillfactor, bs, tblid, schemaname, tblname, heappages, toastpages, is_na\n    -- , tpl_hdr_size, tpl_data_size, pgstattuple(tblid) AS pst -- (DEBUG INFO)\n  FROM (\n    SELECT\n      ( 4 + tpl_hdr_size + tpl_data_size + (2*ma)\n        - CASE WHEN tpl_hdr_size%ma = 0 THEN ma ELSE tpl_hdr_size%ma END\n        - CASE WHEN ceil(tpl_data_size)::int%ma = 0 THEN ma ELSE ceil(tpl_data_size)::int%ma END\n      ) AS tpl_size, bs - page_hdr AS size_per_block, (heappages + toastpages) AS tblpages, heappages,\n      toastpages, reltuples, toasttuples, bs, page_hdr, tblid, schemaname, tblname, fillfactor, is_na\n      -- , tpl_hdr_size, tpl_data_size\n    FROM (\n      SELECT\n        tbl.oid AS tblid, ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,\n        tbl.relpages AS heappages, coalesce(toast.relpages, 0) AS toastpages,\n        coalesce(toast.reltuples, 0) AS toasttuples,\n        coalesce(substring(\n          array_to_string(tbl.reloptions, ' ')\n          FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,\n        current_setting('block_size')::numeric AS bs,\n        CASE WHEN version()~'mingw32' OR version()~'64-bit|x86_64|ppc64|ia64|amd64' THEN 8 ELSE 4 END AS ma,\n        24 AS page_hdr,\n        23 + CASE WHEN MAX(coalesce(s.null_frac,0)) > 0 THEN ( 7 + count(s.attname) ) / 8 ELSE 0::int END\n           + CASE WHEN bool_or(att.attname = 'oid' and att.attnum < 0) THEN 4 ELSE 0 END AS tpl_hdr_size,\n        sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 0) ) AS tpl_data_size,\n        bool_or(att.atttypid = 'pg_catalog.name'::regtype)\n          OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na\n      FROM pg_attribute AS att\n        JOIN pg_class AS tbl ON att.attrelid = tbl.oid\n        JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace\n        LEFT JOIN pg_stats AS s ON s.schemaname=ns.nspname\n          AND s.tablename = tbl.relname AND s.inherited=false AND s.attname=att.attname\n        LEFT JOIN pg_class AS toast ON tbl.reltoastrelid = toast.oid\n      WHERE NOT att.attisdropped\n        AND tbl.relkind in ('r','m')\n      GROUP BY 1,2,3,4,5,6,7,8,9,10\n      ORDER BY 2,3\n    ) AS s\n  ) AS s2\n) AS s3\n-- WHERE NOT is_na\n--   AND tblpages*((pst).free_percent + (pst).dead_tuple_percent)::float4/100 >= 1\nWHERE schemaname NOT IN ('information_schema', 'pg_catalog')\nORDER BY extra_pct DESC;","result_variable":"table_bloat","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+table_bloat =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT current_database(), schemaname, tblname, bs*tblpages AS real_size,
+      (tblpages-est_tblpages)*bs AS extra_size,
+      CASE WHEN tblpages > 0 AND tblpages - est_tblpages > 0
+        THEN 100 * (tblpages - est_tblpages)/tblpages::float
+        ELSE 0
+      END AS extra_pct, fillfactor,
+      CASE WHEN tblpages - est_tblpages_ff > 0
+        THEN (tblpages-est_tblpages_ff)*bs
+        ELSE 0
+      END AS bloat_size,
+      CASE WHEN tblpages > 0 AND tblpages - est_tblpages_ff > 0
+        THEN 100 * (tblpages - est_tblpages_ff)/tblpages::float
+        ELSE 0
+      END AS bloat_pct, is_na
+      -- , tpl_hdr_size, tpl_data_size, (pst).free_percent + (pst).dead_tuple_percent AS real_frag -- (DEBUG INFO)
+    FROM (
+      SELECT ceil( reltuples / ( (bs-page_hdr)/tpl_size ) ) + ceil( toasttuples / 4 ) AS est_tblpages,
+        ceil( reltuples / ( (bs-page_hdr)*fillfactor/(tpl_size*100) ) ) + ceil( toasttuples / 4 ) AS est_tblpages_ff,
+        tblpages, fillfactor, bs, tblid, schemaname, tblname, heappages, toastpages, is_na
+        -- , tpl_hdr_size, tpl_data_size, pgstattuple(tblid) AS pst -- (DEBUG INFO)
+      FROM (
+        SELECT
+          ( 4 + tpl_hdr_size + tpl_data_size + (2*ma)
+            - CASE WHEN tpl_hdr_size%ma = 0 THEN ma ELSE tpl_hdr_size%ma END
+            - CASE WHEN ceil(tpl_data_size)::int%ma = 0 THEN ma ELSE ceil(tpl_data_size)::int%ma END
+          ) AS tpl_size, bs - page_hdr AS size_per_block, (heappages + toastpages) AS tblpages, heappages,
+          toastpages, reltuples, toasttuples, bs, page_hdr, tblid, schemaname, tblname, fillfactor, is_na
+          -- , tpl_hdr_size, tpl_data_size
+        FROM (
+          SELECT
+            tbl.oid AS tblid, ns.nspname AS schemaname, tbl.relname AS tblname, tbl.reltuples,
+            tbl.relpages AS heappages, coalesce(toast.relpages, 0) AS toastpages,
+            coalesce(toast.reltuples, 0) AS toasttuples,
+            coalesce(substring(
+              array_to_string(tbl.reloptions, ' ')
+              FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor,
+            current_setting('block_size')::numeric AS bs,
+            CASE WHEN version()~'mingw32' OR version()~'64-bit|x86_64|ppc64|ia64|amd64' THEN 8 ELSE 4 END AS ma,
+            24 AS page_hdr,
+            23 + CASE WHEN MAX(coalesce(s.null_frac,0)) > 0 THEN ( 7 + count(s.attname) ) / 8 ELSE 0::int END
+               + CASE WHEN bool_or(att.attname = 'oid' and att.attnum < 0) THEN 4 ELSE 0 END AS tpl_hdr_size,
+            sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 0) ) AS tpl_data_size,
+            bool_or(att.atttypid = 'pg_catalog.name'::regtype)
+              OR sum(CASE WHEN att.attnum > 0 THEN 1 ELSE 0 END) <> count(s.attname) AS is_na
+          FROM pg_attribute AS att
+            JOIN pg_class AS tbl ON att.attrelid = tbl.oid
+            JOIN pg_namespace AS ns ON ns.oid = tbl.relnamespace
+            LEFT JOIN pg_stats AS s ON s.schemaname=ns.nspname
+              AND s.tablename = tbl.relname AND s.inherited=false AND s.attname=att.attname
+            LEFT JOIN pg_class AS toast ON tbl.reltoastrelid = toast.oid
+          WHERE NOT att.attisdropped
+            AND tbl.relkind in ('r','m')
+          GROUP BY 1,2,3,4,5,6,7,8,9,10
+          ORDER BY 2,3
+        ) AS s
+      ) AS s2
+    ) AS s3
+    -- WHERE NOT is_na
+    --   AND tblpages*((pst).free_percent + (pst).dead_tuple_percent)::float4/100 >= 1
+    WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+    ORDER BY extra_pct DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Table Bloat","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"table_bloat","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"tblname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"bloat_pct","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Table Bloat")
+|> VegaLite.data_from_values(table_bloat, only: ["tblname", "bloat_pct"])
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "tblname", type: :nominal)
+|> VegaLite.encode_field(:y, "bloat_pct", type: :quantitative)
+```
+
+### How bloated are my indexes?
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT current_database(), nspname AS schemaname, tblname, idxname, bs*(relpages)::bigint AS real_size,\n  bs*(relpages-est_pages)::bigint AS extra_size,\n  100.0 * (relpages-est_pages)::float / relpages::float AS extra_pct,\n  fillfactor,\n  CASE WHEN relpages > est_pages_ff\n    THEN bs*(relpages-est_pages_ff)\n    ELSE 0\n  END AS bloat_size,\n  (100 * (relpages-est_pages_ff)::float) / relpages::float AS bloat_pct,\n  is_na\n  -- , 100-(pst).avg_leaf_density AS pst_avg_bloat, est_pages, index_tuple_hdr_bm, maxalign, pagehdr, nulldatawidth, nulldatahdrwidth, reltuples, relpages -- (DEBUG INFO)\nFROM (\n  SELECT coalesce(1 +\n         ceil(reltuples/floor((bs-pageopqdata-pagehdr)/(4+nulldatahdrwidth)::float)), 0 -- ItemIdData size + computed avg size of a tuple (nulldatahdrwidth)\n      ) AS est_pages,\n      coalesce(1 +\n         ceil(reltuples/floor((bs-pageopqdata-pagehdr)*fillfactor/(100*(4+nulldatahdrwidth)::float))), 0\n      ) AS est_pages_ff,\n      bs, nspname, tblname, idxname, relpages, fillfactor, is_na\n      -- , pgstatindex(idxoid) AS pst, index_tuple_hdr_bm, maxalign, pagehdr, nulldatawidth, nulldatahdrwidth, reltuples -- (DEBUG INFO)\n  FROM (\n      SELECT maxalign, bs, nspname, tblname, idxname, reltuples, relpages, idxoid, fillfactor,\n            ( index_tuple_hdr_bm +\n                maxalign - CASE -- Add padding to the index tuple header to align on MAXALIGN\n                  WHEN index_tuple_hdr_bm%maxalign = 0 THEN maxalign\n                  ELSE index_tuple_hdr_bm%maxalign\n                END\n              + nulldatawidth + maxalign - CASE -- Add padding to the data to align on MAXALIGN\n                  WHEN nulldatawidth = 0 THEN 0\n                  WHEN nulldatawidth::integer%maxalign = 0 THEN maxalign\n                  ELSE nulldatawidth::integer%maxalign\n                END\n            )::numeric AS nulldatahdrwidth, pagehdr, pageopqdata, is_na\n            -- , index_tuple_hdr_bm, nulldatawidth -- (DEBUG INFO)\n      FROM (\n          SELECT n.nspname, i.tblname, i.idxname, i.reltuples, i.relpages,\n              i.idxoid, i.fillfactor, current_setting('block_size')::numeric AS bs,\n              CASE -- MAXALIGN: 4 on 32bits, 8 on 64bits (and mingw32 ?)\n                WHEN version() ~ 'mingw32' OR version() ~ '64-bit|x86_64|ppc64|ia64|amd64' THEN 8\n                ELSE 4\n              END AS maxalign,\n              /* per page header, fixed size: 20 for 7.X, 24 for others */\n              24 AS pagehdr,\n              /* per page btree opaque data */\n              16 AS pageopqdata,\n              /* per tuple header: add IndexAttributeBitMapData if some cols are null-able */\n              CASE WHEN max(coalesce(s.null_frac,0)) = 0\n                  THEN 8 -- IndexTupleData size\n                  ELSE 8 + (( 32 + 8 - 1 ) / 8) -- IndexTupleData size + IndexAttributeBitMapData size ( max num filed per index + 8 - 1 /8)\n              END AS index_tuple_hdr_bm,\n              /* data len: we remove null values save space using it fractionnal part from stats */\n              sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 1024)) AS nulldatawidth,\n              max( CASE WHEN i.atttypid = 'pg_catalog.name'::regtype THEN 1 ELSE 0 END ) > 0 AS is_na\n          FROM (\n              SELECT ct.relname AS tblname, ct.relnamespace, ic.idxname, ic.attpos, ic.indkey, ic.indkey[ic.attpos], ic.reltuples, ic.relpages, ic.tbloid, ic.idxoid, ic.fillfactor,\n                  coalesce(a1.attnum, a2.attnum) AS attnum, coalesce(a1.attname, a2.attname) AS attname, coalesce(a1.atttypid, a2.atttypid) AS atttypid,\n                  CASE WHEN a1.attnum IS NULL\n                  THEN ic.idxname\n                  ELSE ct.relname\n                  END AS attrelname\n              FROM (\n                  SELECT idxname, reltuples, relpages, tbloid, idxoid, fillfactor, indkey,\n                      pg_catalog.generate_series(1,indnatts) AS attpos\n                  FROM (\n                      SELECT ci.relname AS idxname, ci.reltuples, ci.relpages, i.indrelid AS tbloid,\n                          i.indexrelid AS idxoid,\n                          coalesce(substring(\n                              array_to_string(ci.reloptions, ' ')\n                              from 'fillfactor=([0-9]+)')::smallint, 90) AS fillfactor,\n                          i.indnatts,\n                          pg_catalog.string_to_array(pg_catalog.textin(\n                              pg_catalog.int2vectorout(i.indkey)),' ')::int[] AS indkey\n                      FROM pg_catalog.pg_index i\n                      JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid\n                      WHERE ci.relam=(SELECT oid FROM pg_am WHERE amname = 'btree')\n                      AND ci.relpages > 0\n                  ) AS idx_data\n              ) AS ic\n              JOIN pg_catalog.pg_class ct ON ct.oid = ic.tbloid\n              LEFT JOIN pg_catalog.pg_attribute a1 ON\n                  ic.indkey[ic.attpos] <> 0\n                  AND a1.attrelid = ic.tbloid\n                  AND a1.attnum = ic.indkey[ic.attpos]\n              LEFT JOIN pg_catalog.pg_attribute a2 ON\n                  ic.indkey[ic.attpos] = 0\n                  AND a2.attrelid = ic.idxoid\n                  AND a2.attnum = ic.attpos\n            ) i\n            JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace\n            JOIN pg_catalog.pg_stats s ON s.schemaname = n.nspname\n                                      AND s.tablename = i.attrelname\n                                      AND s.attname = i.attname\n            GROUP BY 1,2,3,4,5,6,7,8,9,10,11\n      ) AS rows_data_stats\n  ) AS rows_hdr_pdg_stats\n) AS relation_stats\nWHERE\n    nspname NOT IN ('information_schema', 'pg_catalog') AND\n    100.0 * (relpages-est_pages)::float / relpages::float > 0\nORDER BY extra_pct DESC;","result_variable":"index_bloat","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+index_bloat =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT current_database(), nspname AS schemaname, tblname, idxname, bs*(relpages)::bigint AS real_size,
+      bs*(relpages-est_pages)::bigint AS extra_size,
+      100.0 * (relpages-est_pages)::float / relpages::float AS extra_pct,
+      fillfactor,
+      CASE WHEN relpages > est_pages_ff
+        THEN bs*(relpages-est_pages_ff)
+        ELSE 0
+      END AS bloat_size,
+      (100 * (relpages-est_pages_ff)::float) / relpages::float AS bloat_pct,
+      is_na
+      -- , 100-(pst).avg_leaf_density AS pst_avg_bloat, est_pages, index_tuple_hdr_bm, maxalign, pagehdr, nulldatawidth, nulldatahdrwidth, reltuples, relpages -- (DEBUG INFO)
+    FROM (
+      SELECT coalesce(1 +
+             ceil(reltuples/floor((bs-pageopqdata-pagehdr)/(4+nulldatahdrwidth)::float)), 0 -- ItemIdData size + computed avg size of a tuple (nulldatahdrwidth)
+          ) AS est_pages,
+          coalesce(1 +
+             ceil(reltuples/floor((bs-pageopqdata-pagehdr)*fillfactor/(100*(4+nulldatahdrwidth)::float))), 0
+          ) AS est_pages_ff,
+          bs, nspname, tblname, idxname, relpages, fillfactor, is_na
+          -- , pgstatindex(idxoid) AS pst, index_tuple_hdr_bm, maxalign, pagehdr, nulldatawidth, nulldatahdrwidth, reltuples -- (DEBUG INFO)
+      FROM (
+          SELECT maxalign, bs, nspname, tblname, idxname, reltuples, relpages, idxoid, fillfactor,
+                ( index_tuple_hdr_bm +
+                    maxalign - CASE -- Add padding to the index tuple header to align on MAXALIGN
+                      WHEN index_tuple_hdr_bm%maxalign = 0 THEN maxalign
+                      ELSE index_tuple_hdr_bm%maxalign
+                    END
+                  + nulldatawidth + maxalign - CASE -- Add padding to the data to align on MAXALIGN
+                      WHEN nulldatawidth = 0 THEN 0
+                      WHEN nulldatawidth::integer%maxalign = 0 THEN maxalign
+                      ELSE nulldatawidth::integer%maxalign
+                    END
+                )::numeric AS nulldatahdrwidth, pagehdr, pageopqdata, is_na
+                -- , index_tuple_hdr_bm, nulldatawidth -- (DEBUG INFO)
+          FROM (
+              SELECT n.nspname, i.tblname, i.idxname, i.reltuples, i.relpages,
+                  i.idxoid, i.fillfactor, current_setting('block_size')::numeric AS bs,
+                  CASE -- MAXALIGN: 4 on 32bits, 8 on 64bits (and mingw32 ?)
+                    WHEN version() ~ 'mingw32' OR version() ~ '64-bit|x86_64|ppc64|ia64|amd64' THEN 8
+                    ELSE 4
+                  END AS maxalign,
+                  /* per page header, fixed size: 20 for 7.X, 24 for others */
+                  24 AS pagehdr,
+                  /* per page btree opaque data */
+                  16 AS pageopqdata,
+                  /* per tuple header: add IndexAttributeBitMapData if some cols are null-able */
+                  CASE WHEN max(coalesce(s.null_frac,0)) = 0
+                      THEN 8 -- IndexTupleData size
+                      ELSE 8 + (( 32 + 8 - 1 ) / 8) -- IndexTupleData size + IndexAttributeBitMapData size ( max num filed per index + 8 - 1 /8)
+                  END AS index_tuple_hdr_bm,
+                  /* data len: we remove null values save space using it fractionnal part from stats */
+                  sum( (1-coalesce(s.null_frac, 0)) * coalesce(s.avg_width, 1024)) AS nulldatawidth,
+                  max( CASE WHEN i.atttypid = 'pg_catalog.name'::regtype THEN 1 ELSE 0 END ) > 0 AS is_na
+              FROM (
+                  SELECT ct.relname AS tblname, ct.relnamespace, ic.idxname, ic.attpos, ic.indkey, ic.indkey[ic.attpos], ic.reltuples, ic.relpages, ic.tbloid, ic.idxoid, ic.fillfactor,
+                      coalesce(a1.attnum, a2.attnum) AS attnum, coalesce(a1.attname, a2.attname) AS attname, coalesce(a1.atttypid, a2.atttypid) AS atttypid,
+                      CASE WHEN a1.attnum IS NULL
+                      THEN ic.idxname
+                      ELSE ct.relname
+                      END AS attrelname
+                  FROM (
+                      SELECT idxname, reltuples, relpages, tbloid, idxoid, fillfactor, indkey,
+                          pg_catalog.generate_series(1,indnatts) AS attpos
+                      FROM (
+                          SELECT ci.relname AS idxname, ci.reltuples, ci.relpages, i.indrelid AS tbloid,
+                              i.indexrelid AS idxoid,
+                              coalesce(substring(
+                                  array_to_string(ci.reloptions, ' ')
+                                  from 'fillfactor=([0-9]+)')::smallint, 90) AS fillfactor,
+                              i.indnatts,
+                              pg_catalog.string_to_array(pg_catalog.textin(
+                                  pg_catalog.int2vectorout(i.indkey)),' ')::int[] AS indkey
+                          FROM pg_catalog.pg_index i
+                          JOIN pg_catalog.pg_class ci ON ci.oid = i.indexrelid
+                          WHERE ci.relam=(SELECT oid FROM pg_am WHERE amname = 'btree')
+                          AND ci.relpages > 0
+                      ) AS idx_data
+                  ) AS ic
+                  JOIN pg_catalog.pg_class ct ON ct.oid = ic.tbloid
+                  LEFT JOIN pg_catalog.pg_attribute a1 ON
+                      ic.indkey[ic.attpos] <> 0
+                      AND a1.attrelid = ic.tbloid
+                      AND a1.attnum = ic.indkey[ic.attpos]
+                  LEFT JOIN pg_catalog.pg_attribute a2 ON
+                      ic.indkey[ic.attpos] = 0
+                      AND a2.attrelid = ic.idxoid
+                      AND a2.attnum = ic.attpos
+                ) i
+                JOIN pg_catalog.pg_namespace n ON n.oid = i.relnamespace
+                JOIN pg_catalog.pg_stats s ON s.schemaname = n.nspname
+                                          AND s.tablename = i.attrelname
+                                          AND s.attname = i.attname
+                GROUP BY 1,2,3,4,5,6,7,8,9,10,11
+          ) AS rows_data_stats
+      ) AS rows_hdr_pdg_stats
+    ) AS relation_stats
+    WHERE
+        nspname NOT IN ('information_schema', 'pg_catalog') AND
+        100.0 * (relpages-est_pages)::float / relpages::float > 0
+    ORDER BY extra_pct DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Index Bloat","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"index_bloat","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"idxname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"bloat_pct","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Index Bloat")
+|> VegaLite.data_from_values(index_bloat, only: ["idxname", "bloat_pct"])
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "idxname", type: :nominal)
+|> VegaLite.encode_field(:y, "bloat_pct", type: :quantitative)
+```
+
+## Relation Sizes
+
+### Relation sizes (in one query)
+
+If this an OLTP database this is all expected to fit in RAM buffers.
+If this is an OLAP database it is not required, but keep an eye on disk IO if you see performance worse than expected.
+If this is a pass through db then basically the OLAP rules apply.
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH db_size AS (\n    SELECT current_database() AS relname,\n           pg_size_pretty(pg_database_size(current_database())) AS relsize\n),\ntotal_table_size AS (\n    SELECT\n        pg_size_pretty(sum(pg_table_size(schemaname || '.' || relname))) AS tablehumansize\n    FROM pg_stat_user_tables\n),\ntable_size AS (\n    SELECT\n        schemaname || '.' || relname AS tablename,\n        pg_size_pretty(pg_table_size(schemaname || '.' || relname)) AS tablehumansize,\n        pg_table_size(schemaname || '.' || relname) AS tablesize\n    FROM pg_stat_user_tables\n    ORDER BY\n        tablesize DESC\n),\ntotal_index_size AS (\n    SELECT\n        pg_size_pretty(sum(pg_indexes_size(schemaname || '.' || relname))) AS indexhumansize\n    FROM pg_stat_user_indexes\n),\nindex_size AS (\n    SELECT\n        schemaname || '.' || relname || '.' || indexrelname AS indexname,\n        pg_indexes_size(schemaname || '.' || relname) AS indexsize,\n        pg_size_pretty(pg_indexes_size(schemaname || '.' || relname)) AS indexhumansize\n    FROM pg_stat_user_indexes\n    ORDER BY\n        indexsize DESC\n)\nSELECT 'Database' AS relation, 'Size' AS size\nUNION ALL\nSELECT relname AS relation, relsize AS size FROM db_size\nUNION ALL\nSELECT '---------' , '---------'\nUNION ALL\nSELECT 'Total Table' AS relation, 'Size' AS size\nUNION ALL\nSELECT 'All Tables', tablehumansize FROM total_table_size\nUNION ALL\nSELECT '---------' , '---------'\nUNION ALL\nSELECT 'Table' AS relation, 'Size' AS size\nUNION ALL\nSELECT tablename AS relation, tablehumansize AS size FROM table_size\nUNION ALL\nSELECT '---------' , '---------'\nUNION ALL\nSELECT 'Total Index' AS relation, 'Size' AS size\nUNION ALL\nSELECT 'All Indexes', indexhumansize FROM total_index_size\nUNION ALL\nSELECT '---------' , '---------'\nUNION ALL\nSELECT 'Index' AS relation, 'Size' AS size\nUNION ALL\nSELECT indexname AS relation, indexhumansize AS size FROM index_size;","result_variable":"relation_size","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+relation_size =
+  Postgrex.query!(
+    conn,
+    """
+    WITH db_size AS (
+        SELECT current_database() AS relname,
+               pg_size_pretty(pg_database_size(current_database())) AS relsize
+    ),
+    total_table_size AS (
+        SELECT
+            pg_size_pretty(sum(pg_table_size(schemaname || '.' || relname))) AS tablehumansize
+        FROM pg_stat_user_tables
+    ),
+    table_size AS (
+        SELECT
+            schemaname || '.' || relname AS tablename,
+            pg_size_pretty(pg_table_size(schemaname || '.' || relname)) AS tablehumansize,
+            pg_table_size(schemaname || '.' || relname) AS tablesize
+        FROM pg_stat_user_tables
+        ORDER BY
+            tablesize DESC
+    ),
+    total_index_size AS (
+        SELECT
+            pg_size_pretty(sum(pg_indexes_size(schemaname || '.' || relname))) AS indexhumansize
+        FROM pg_stat_user_indexes
+    ),
+    index_size AS (
+        SELECT
+            schemaname || '.' || relname || '.' || indexrelname AS indexname,
+            pg_indexes_size(schemaname || '.' || relname) AS indexsize,
+            pg_size_pretty(pg_indexes_size(schemaname || '.' || relname)) AS indexhumansize
+        FROM pg_stat_user_indexes
+        ORDER BY
+            indexsize DESC
+    )
+    SELECT 'Database' AS relation, 'Size' AS size
+    UNION ALL
+    SELECT relname AS relation, relsize AS size FROM db_size
+    UNION ALL
+    SELECT '---------' , '---------'
+    UNION ALL
+    SELECT 'Total Table' AS relation, 'Size' AS size
+    UNION ALL
+    SELECT 'All Tables', tablehumansize FROM total_table_size
+    UNION ALL
+    SELECT '---------' , '---------'
+    UNION ALL
+    SELECT 'Table' AS relation, 'Size' AS size
+    UNION ALL
+    SELECT tablename AS relation, tablehumansize AS size FROM table_size
+    UNION ALL
+    SELECT '---------' , '---------'
+    UNION ALL
+    SELECT 'Total Index' AS relation, 'Size' AS size
+    UNION ALL
+    SELECT 'All Indexes', indexhumansize FROM total_index_size
+    UNION ALL
+    SELECT '---------' , '---------'
+    UNION ALL
+    SELECT 'Index' AS relation, 'Size' AS size
+    UNION ALL
+    SELECT indexname AS relation, indexhumansize AS size FROM index_size;
+    """,
+    []
+  )
+```
+
+### Database Sizes
+
+Optionally, you can just look at database sizes.  This is better if multiple databases are used.  Use the above query per database if you wish to break down each.  See comments above on DB types and whether these should all fit in memory.
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n datname, \n pg_size_pretty(pg_database_size(datname)) AS size, \n pg_database_size(datname) AS actual \nFROM \n pg_stat_database \nWHERE \n datname IS NOT NULL AND\n datname NOT IN ('postgres', 'template0', 'template1')","result_variable":"db_sizes","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+db_sizes =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     datname, 
+     pg_size_pretty(pg_database_size(datname)) AS size, 
+     pg_database_size(datname) AS actual 
+    FROM 
+     pg_stat_database 
+    WHERE 
+     datname IS NOT NULL AND
+     datname NOT IN ('postgres', 'template0', 'template1')
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Database Sizes","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"db_sizes","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"datname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"actual","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":600},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 600, title: "Database Sizes")
+|> VegaLite.data_from_values(db_sizes, only: ["datname", "actual"])
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "datname", type: :nominal)
+|> VegaLite.encode_field(:y, "actual", type: :quantitative)
+```
+
+### Total Database Size - All databases
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT \n 'TOTAL' as total, \n pg_size_pretty(sum(pg_database_size(datname))) AS size, \n sum(pg_database_size(datname)) AS actual \nFROM\n pg_stat_database;","result_variable":"total_db_size","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+total_db_size =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT 
+     'TOTAL' as total, 
+     pg_size_pretty(sum(pg_database_size(datname))) AS size, 
+     sum(pg_database_size(datname)) AS actual 
+    FROM
+     pg_stat_database;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH total_db_size AS (\n SELECT\n  sum(pg_database_size(datname))::float AS db_size\n FROM\n  pg_stat_database\n),\ntotal_buffer_size AS (\n SELECT\n  (replace(unit, 'kB', '')::int * 1024 * setting::int)::float AS buffer_size\n FROM\n  pg_settings \n WHERE\n  name = 'shared_buffers'\n)\nSELECT\n total_db_size.db_size,\n total_buffer_size.buffer_size,\n (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer\nFROM\n total_db_size\nJOIN total_buffer_size ON 1 = 1;","result_variable":"data_vs_buffer","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+data_vs_buffer =
+  Postgrex.query!(
+    conn,
+    """
+    WITH total_db_size AS (
+     SELECT
+      sum(pg_database_size(datname))::float AS db_size
+     FROM
+      pg_stat_database
+    ),
+    total_buffer_size AS (
+     SELECT
+      (replace(unit, 'kB', '')::int * 1024 * setting::int)::float AS buffer_size
+     FROM
+      pg_settings 
+     WHERE
+      name = 'shared_buffers'
+    )
+    SELECT
+     total_db_size.db_size,
+     total_buffer_size.buffer_size,
+     (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer
+    FROM
+     total_db_size
+    JOIN total_buffer_size ON 1 = 1;
+    """,
+    []
+  )
+```
+
+```elixir
+# IO.inspect(data_vs_buffer)
+[[total_db_size, total_buffer_size, data_percentage]] = data_vs_buffer.rows
+
+if data_percentage > 100.0 do
+  "Data is larger than available buffers.  Consider a larger instance size or adjust available buffers."
+else
+  if data_percentage > 90.0 do
+    "Data is more than 90% of buffers.  You are almost out of buffer space."
+  else
+    "Data fits within buffers."
+  end
+end
+```
+
+## WAL
+
+Wal log info
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT archived_count, \n COALESCE(last_archived_wal, ''),\n COALESCE(EXTRACT(EPOCH FROM last_archived_time)::bigint, 0),\n failed_count,\n COALESCE(last_failed_wal, ''),\n COALESCE(EXTRACT(EPOCH FROM last_failed_time)::bigint, 0),\n COALESCE(EXTRACT(EPOCH FROM stats_reset)::bigint, 0)\nFROM pg_stat_archiver","result_variable":"wal_info","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+wal_info =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT archived_count, 
+     COALESCE(last_archived_wal, ''),
+     COALESCE(EXTRACT(EPOCH FROM last_archived_time)::bigint, 0),
+     failed_count,
+     COALESCE(last_failed_wal, ''),
+     COALESCE(EXTRACT(EPOCH FROM last_failed_time)::bigint, 0),
+     COALESCE(EXTRACT(EPOCH FROM stats_reset)::bigint, 0)
+    FROM pg_stat_archiver
+    """,
+    []
+  )
+```
+
+## Unused Indexes
+
+Here's a list of indexes that haven't been used since statistics restarted(db restart, intentional reset of stats)
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n  relname AS table,\n  indexrelname AS index,\n  pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,\n  idx_scan as index_scans\nFROM pg_stat_user_indexes ui\nJOIN pg_index i ON ui.indexrelid = i.indexrelid\nWHERE NOT indisunique AND idx_scan =0 AND pg_relation_size(relid) > 5 * 8192\nORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST,\npg_relation_size(i.indexrelid) DESC;","result_variable":"unused_indexes","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+unused_indexes =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+      relname AS table,
+      indexrelname AS index,
+      pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,
+      idx_scan as index_scans
+    FROM pg_stat_user_indexes ui
+    JOIN pg_index i ON ui.indexrelid = i.indexrelid
+    WHERE NOT indisunique AND idx_scan =0 AND pg_relation_size(relid) > 5 * 8192
+    ORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST,
+    pg_relation_size(i.indexrelid) DESC;
+    """,
+    []
+  )
+```
+
+### Max Connections
+
+Maximum number of configured database connections
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT name, setting FROM pg_settings WHERE name = 'max_connections'","result_variable":"max_connections","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+max_connections =
+  Postgrex.query!(
+    conn,
+    "SELECT name, setting FROM pg_settings WHERE name = 'max_connections'",
+    []
+  )
+```
+
+## Connection Info
+
+### Max Used Connections
+
+Maximum used connections since restart or stat reset.????
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"select  * from\n(select count(*) used from pg_stat_activity) q1,\n(select setting::int res_for_super from pg_settings where name=$$superuser_reserved_connections$$) q2,\n(select setting::int max_conn from pg_settings where name=$$max_connections$$) q3;","result_variable":"max_used_basic","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+max_used_basic =
+  Postgrex.query!(
+    conn,
+    """
+    select  * from
+    (select count(*) used from pg_stat_activity) q1,
+    (select setting::int res_for_super from pg_settings where name=$$superuser_reserved_connections$$) q2,
+    (select setting::int max_conn from pg_settings where name=$$max_connections$$) q3;
+    """,
+    []
+  )
+```
+
+### Max Used Connections with CTE
+
+Try again with CTE so we can calculate percentages
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH current_connections AS (\n  SELECT count(1) AS used FROM pg_stat_activity\n),\nreserved_for_super AS (\n  SELECT setting::int AS res_for_super FROM pg_settings WHERE name = 'superuser_reserved_connections'\n),\nmax_connections AS (\n  SELECT setting::int AS max_connections FROM pg_settings WHERE name = 'max_connections'\n)\nSELECT\n current_connections.used,\n reserved_for_super.res_for_super AS reserved_for_super,\n max_connections.max_connections,\n ((current_connections.used::float + 1) / (reserved_for_super.res_for_super::float + max_connections.max_connections::float + 1) * 100.0) AS pct_used\nFROM\n current_connections\nJOIN\n reserved_for_super ON 1 = 1\nJOIN\n max_connections ON 1 = 1","result_variable":"max_used","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+max_used =
+  Postgrex.query!(
+    conn,
+    """
+    WITH current_connections AS (
+      SELECT count(1) AS used FROM pg_stat_activity
+    ),
+    reserved_for_super AS (
+      SELECT setting::int AS res_for_super FROM pg_settings WHERE name = 'superuser_reserved_connections'
+    ),
+    max_connections AS (
+      SELECT setting::int AS max_connections FROM pg_settings WHERE name = 'max_connections'
+    )
+    SELECT
+     current_connections.used,
+     reserved_for_super.res_for_super AS reserved_for_super,
+     max_connections.max_connections,
+     ((current_connections.used::float + 1) / (reserved_for_super.res_for_super::float + max_connections.max_connections::float + 1) * 100.0) AS pct_used
+    FROM
+     current_connections
+    JOIN
+     reserved_for_super ON 1 = 1
+    JOIN
+     max_connections ON 1 = 1
+    """,
+    []
+  )
+```
+
+### Connections per DB
+
+This is the number of active connections per DB.
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n datname,\n numbackends \nFROM\n pg_stat_database \nWHERE\n datname IS NOT NULL AND \n datname NOT IN ('template0', 'template1', 'postgres');","result_variable":"connections_per_db","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+connections_per_db =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     datname,
+     numbackends 
+    FROM
+     pg_stat_database 
+    WHERE
+     datname IS NOT NULL AND 
+     datname NOT IN ('template0', 'template1', 'postgres');
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Connections per DB","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"connections_per_db","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"datname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"numbackends","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Connections per DB")
+|> VegaLite.data_from_values(connections_per_db, only: ["datname", "numbackends"])
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "datname", type: :nominal)
+|> VegaLite.encode_field(:y, "numbackends", type: :quantitative)
+```
+
+## PostgreSQL Memory Usage
+
+Memory/Buffer Usage information
+
+### Buffer Pool Usage - DB
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT \n datname,\n blks_read AS read_from_disk,\n blks_hit AS read_from_buffer,\n ((blks_read::float + 1.0) / ((blks_read::float + blks_hit::float + 1.0)) * 100::float) AS percentage_from_disk\nFROM\n pg_stat_database\nWHERE\n datname IS NOT NULL AND\n datname NOT IN ('postgres', 'template0', 'template1')\nORDER BY 4 DESC;","result_variable":"buffer_pool_usage_db","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+buffer_pool_usage_db =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT 
+     datname,
+     blks_read AS read_from_disk,
+     blks_hit AS read_from_buffer,
+     ((blks_read::float + 1.0) / ((blks_read::float + blks_hit::float + 1.0)) * 100::float) AS percentage_from_disk
+    FROM
+     pg_stat_database
+    WHERE
+     datname IS NOT NULL AND
+     datname NOT IN ('postgres', 'template0', 'template1')
+    ORDER BY 4 DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Buffer Pool Usage by DB","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"buffer_pool_usage_db","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"datname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"percentage_from_disk","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Buffer Pool Usage by DB")
+|> VegaLite.data_from_values(buffer_pool_usage_db,
+  only: ["datname", "percentage_from_disk"]
+)
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "datname", type: :nominal)
+|> VegaLite.encode_field(:y, "percentage_from_disk", type: :quantitative)
+```
+
+### Buffer Pool Usage - Tables
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname, \n heap_blks_read, \n heap_blks_hit,\n ((heap_blks_read::float + 1.0) / (heap_blks_read::float + heap_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk\nFROM\n pg_statio_user_tables\nORDER BY 5 DESC;","result_variable":"buffer_pool_usage_tables","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+buffer_pool_usage_tables =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     schemaname,
+     relname, 
+     heap_blks_read, 
+     heap_blks_hit,
+     ((heap_blks_read::float + 1.0) / (heap_blks_read::float + heap_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk
+    FROM
+     pg_statio_user_tables
+    ORDER BY 5 DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Buffer Pool Usage by Table","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"buffer_pool_usage_tables","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"relname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"percentage_from_disk","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Buffer Pool Usage by Table")
+|> VegaLite.data_from_values(buffer_pool_usage_tables,
+  only: ["relname", "percentage_from_disk"]
+)
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "relname", type: :nominal)
+|> VegaLite.encode_field(:y, "percentage_from_disk", type: :quantitative)
+```
+
+### Buffer Pool Usage - Indexes
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname, \n idx_blks_read, \n idx_blks_hit,\n ((idx_blks_read::float + 1.0) / (idx_blks_read::float + idx_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk\nFROM\n pg_statio_user_tables\nORDER BY 5 DESC;","result_variable":"buffer_pool_usage_indexes","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+buffer_pool_usage_indexes =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     schemaname,
+     relname, 
+     idx_blks_read, 
+     idx_blks_hit,
+     ((idx_blks_read::float + 1.0) / (idx_blks_read::float + idx_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk
+    FROM
+     pg_statio_user_tables
+    ORDER BY 5 DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Buffer Pool Usage - Indexes","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"buffer_pool_usage_indexes","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"relname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"percentage_from_disk","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Buffer Pool Usage - Indexes")
+|> VegaLite.data_from_values(buffer_pool_usage_indexes,
+  only: ["relname", "percentage_from_disk"]
+)
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "relname", type: :nominal)
+|> VegaLite.encode_field(:y, "percentage_from_disk", type: :quantitative)
+```
+
+## Index / Table Scans
+
+### Index Usage By Table
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname,\n seq_scan,\n idx_scan,\n ((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS seq_scan_percentage\nFROM\n pg_stat_user_tables\nORDER BY 5 DESC;","result_variable":"index_usage_by_table","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+index_usage_by_table =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     schemaname,
+     relname,
+     seq_scan,
+     idx_scan,
+     ((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS seq_scan_percentage
+    FROM
+     pg_stat_user_tables
+    ORDER BY 5 DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Index Usage by Table","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"index_usage_by_table","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"relname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"seq_scan_percentage","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Index Usage by Table")
+|> VegaLite.data_from_values(index_usage_by_table,
+  only: ["relname", "seq_scan_percentage"]
+)
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "relname", type: :nominal)
+|> VegaLite.encode_field(:y, "seq_scan_percentage", type: :quantitative)
+```
+
+### Index Usage by Index
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname,\n indexrelname,\n idx_scan\nFROM\n pg_stat_user_indexes\nWHERE idx_scan > 0\nORDER BY\n idx_scan DESC;","result_variable":"index_usage_by_index","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+index_usage_by_index =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     schemaname,
+     relname,
+     indexrelname,
+     idx_scan
+    FROM
+     pg_stat_user_indexes
+    WHERE idx_scan > 0
+    ORDER BY
+     idx_scan DESC;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"chart_title":"Index Usage by Index","height":null,"layers":[{"active":true,"chart_type":"bar","color_field":null,"color_field_aggregate":null,"color_field_bin":null,"color_field_scale_scheme":null,"color_field_type":null,"data_variable":"index_usage_by_index","geodata_color":"blue","latitude_field":null,"longitude_field":null,"x_field":"indexrelname","x_field_aggregate":null,"x_field_bin":null,"x_field_scale_type":null,"x_field_type":"nominal","y_field":"idx_scan","y_field_aggregate":null,"y_field_bin":null,"y_field_scale_type":null,"y_field_type":"quantitative"}],"vl_alias":"Elixir.VegaLite","width":700},"chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 700, title: "Index Usage by Index")
+|> VegaLite.data_from_values(index_usage_by_index, only: ["indexrelname", "idx_scan"])
+|> VegaLite.mark(:bar)
+|> VegaLite.encode_field(:x, "indexrelname", type: :nominal)
+|> VegaLite.encode_field(:y, "idx_scan", type: :quantitative)
+```
+
+## Developer Scorecard
+
+How often do queries go to production that don't use indexes?
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n avg((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS overall_scorecard\nFROM\n pg_stat_user_tables;","result_variable":"developer_scorecard","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+developer_scorecard =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     avg((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS overall_scorecard
+    FROM
+     pg_stat_user_tables;
+    """,
+    []
+  )
+```
+
+```elixir
+# IO.inspect(developer_scorecard.rows)
+[[scorecard]] = developer_scorecard.rows
+# IO.inspect scorecard
+if scorecard > 1 do
+  "More than 1% of your queries are NOT using an index. Consider adding indexes and optimizing your queries."
+else
+  "Fewer than 1% of your queries are NOT using an index."
+end
+```
+
+## Query Analytics
+
+### Trouble queries by AVG Exec Time
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n query, \n calls, \n (total_exec_time::float/calls::float)::float AS avg_time_ms,\n total_exec_time\nFROM\n pg_stat_statements\nWHERE\n calls > 1000\nORDER BY avg_time_ms DESC\nLIMIT 100;","result_variable":"trouble_queries_avg","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+trouble_queries_avg =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     query, 
+     calls, 
+     (total_exec_time::float/calls::float)::float AS avg_time_ms,
+     total_exec_time
+    FROM
+     pg_stat_statements
+    WHERE
+     calls > 1000
+    ORDER BY avg_time_ms DESC
+    LIMIT 100;
+    """,
+    []
+  )
+```
+
+### Trouble queries by Total Exec Time
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n query, \n calls, \n (total_exec_time::float/calls::float)::float AS avg_time_ms,\n total_exec_time\nFROM\n pg_stat_statements\nWHERE\n calls > 1000\nORDER BY total_exec_time DESC\nLIMIT 100;","result_variable":"trouble_queries_total","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+trouble_queries_total =
+  Postgrex.query!(
+    conn,
+    """
+    SELECT
+     query, 
+     calls, 
+     (total_exec_time::float/calls::float)::float AS avg_time_ms,
+     total_exec_time
+    FROM
+     pg_stat_statements
+    WHERE
+     calls > 1000
+    ORDER BY total_exec_time DESC
+    LIMIT 100;
+    """,
+    []
+  )
+```
