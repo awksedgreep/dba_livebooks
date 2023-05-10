@@ -4,7 +4,3 @@ I'm an open source DBA and I am putting together some best practice queries for 
 
 Feedback is very welcome.
 
-```bash
-'njoy,
-Mark
-```
