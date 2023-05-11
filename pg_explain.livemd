@@ -880,7 +880,7 @@ VegaLite.new(width: 700, title: "Index Usage by Index")
 
 ## Developer Scorecard
 
-How often do queries go to production that don't use indexes?  What percentage of my queries are using an index?  How much this affects you depends on data size and load, but many large databases do 10k+ reads/sec.  1% of that would be catastrophic.  Blogs can get by with never using indexes.  It depends on the purpose, but this is definitely a number to watch.
+How often do queries go to production that don't use indexes?  What percentage of my queries are using an index?  How much this affects you depends on data size and load, but many large databases do 10k+ reads/sec.  Even 1% table scans of that would be catastrophic.  Blogs can get by with never using indexes.  It depends on the purpose of the database, but this is definitely a number to watch.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n avg((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS overall_scorecard\nFROM\n pg_stat_user_tables;","result_variable":"developer_scorecard","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
