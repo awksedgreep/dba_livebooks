@@ -64,13 +64,22 @@ major_and_minor =
 ```
 
 ```elixir
-# IO.inspect(major_and_minor)
+Application.ensure_all_started(:inets)
+Application.ensure_all_started(:ssl)
+
+{:ok, {{'HTTP/1.1', 200, 'OK'}, _headers, body}} =
+  :httpc.request(:get, {'https://apt.postgresql.org/pub/latest/', []}, [], [])
+
+[result] = Regex.run(~r/postgresql-[^\.+]*/, to_string(body), [])
+{version, _} = Integer.parse(String.slice(result, 11..12))
 [[major, minor]] = major_and_minor.rows
 
-if major <= 11 do
-  "Consider upgrading to at least PostgreSQL 12"
+if major <= version - 3 do
+  IO.puts("The latest PostgreSQL version is #{version}")
+  IO.puts("Consider upgrading to at least PostgreSQL #{version - 2}")
 else
-  "You're using a newish version"
+  IO.puts("The latest PostgreSQL version is #{version}")
+  IO.puts("Version #{major} a newish version")
 end
 ```
 
@@ -316,11 +325,17 @@ VegaLite.new(width: 700, title: "Index Bloat")
 
 ```elixir
 # IO.inspect(index_bloat)
+IO.puts(
+  "-- Do not run these unless you know there won't be side effects.  Make sure your server has been running long enough to evaluate index usage."
+)
+
+IO.puts("-- Uncomment and run the following to clean up indexe free space.")
+
 for row <- index_bloat.rows do
   [_db, schema, _table, index, _, _, idx_pct, _, _, _, _] = row
 
   if idx_pct > 10 do
-    IO.puts("REINDEX INDEX CONCURRENTLY #{schema}.#{index};")
+    IO.puts("-- REINDEX INDEX CONCURRENTLY #{schema}.#{index};")
   end
 end
 ```
@@ -562,9 +577,15 @@ WARNING:  If this report was run right after restarting your database then the s
 
 ```elixir
 # IO.inspect(unused_indexes)
+IO.puts(
+  "-- Make sure your server has been running long enough to make a judgement on whether an index is used or not."
+)
+
+IO.puts("-- Uncomment and run the following to drop unused indexes.")
+
 for row <- unused_indexes.rows do
   [_table, index, _, _] = row
-  IO.puts("DROP INDEX #{index};")
+  IO.puts("-- DROP INDEX #{index};")
 end
 ```
 
@@ -859,7 +880,7 @@ VegaLite.new(width: 700, title: "Index Usage by Index")
 
 ## Developer Scorecard
 
-How often do queries go to production that don't use indexes?
+How often do queries go to production that don't use indexes?  What percentage of my queries are using an index?  How much this affects you depends on data size and load, but many large databases do 10k+ reads/sec.  1% of that would be catastrophic.  Blogs can get by with never using indexes.  It depends on the purpose, but this is definitely a number to watch.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n avg((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS overall_scorecard\nFROM\n pg_stat_user_tables;","result_variable":"developer_scorecard","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -889,6 +910,13 @@ end
 ```
 
 ## Query Analytics
+
+### Enabling pg_stat_statements
+
+If you wish to use the next few queries you'll need pg_stat_statements enabled.  Follow this guide to do so:  [Guide](https://www.postgresql.org/docs/current/pgstatstatements.html)
+Note:  If you use AWS it's likely already enabled.
+
+<!-- livebook:{"break_markdown":true} -->
 
 ### Trouble queries by AVG Exec Time
 
