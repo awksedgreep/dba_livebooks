@@ -970,7 +970,7 @@ trouble_queries_total =
 
 ## Out of Numbers
 
-Did you know your tables and sequences can run out of numbers?  If your tables have any size to them at all it's a very real concern.  Here are the status of your numbers.  If any of your sequences/id columns show up on this list please consider bigint(bigserial).
+Did you know your tables and sequences can run out of numbers?  If your tables have any size to them at all it's a very real concern.  Here are the status of your numbers.  If any of your sequences/id columns show up on this list please consider bigint(bigserial).  Make sure you change the column to match the sequence.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n sequencename,\n data_type,\n max_value,\n last_value,\n (last_value::float / max_value::float) AS pct_used\nFROM pg_sequences\nWHERE\n (last_value::float / max_value::float) > 70;","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
