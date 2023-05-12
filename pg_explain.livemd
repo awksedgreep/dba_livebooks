@@ -321,7 +321,7 @@ VegaLite.new(width: 700, title: "Index Bloat")
 |> VegaLite.encode_field(:y, "bloat_pct", type: :quantitative)
 ```
 
-### Suggested indexes to remove bloat from with examples
+### Index Bloat
 
 ```elixir
 # IO.inspect(index_bloat)
