@@ -68,7 +68,7 @@ Application.ensure_all_started(:inets)
 Application.ensure_all_started(:ssl)
 
 {:ok, {{'HTTP/1.1', 200, 'OK'}, _headers, body}} =
-  :httpc.request(:get, {'https://apt.postgresql.org/pub/latest/', []}, [], [])
+  :httpc.request(:get, {'http://apt.postgresql.org/pub/latest/', []}, [], [])
 
 [result] = Regex.run(~r/postgresql-[^\.+]*/, to_string(body), [])
 {version, _} = Integer.parse(String.slice(result, 11..12))
