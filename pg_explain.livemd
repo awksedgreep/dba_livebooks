@@ -986,3 +986,5 @@ result =
     []
   )
 ```
+
+The bloat queries above are modified versions of the queries found [here](https://github.com/ioguix/pgsql-bloat-estimation) with the license [here](https://github.com/ioguix/pgsql-bloat-estimation/blob/master/LICENSE).
