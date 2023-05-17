@@ -12,6 +12,12 @@ Mix.install([
 
 ## Basic DB Information
 
+### Explain DB
+
+##### It's like explain query, but for your entire database.
+
+### Connect to your DB here
+
 <!-- livebook:{"attrs":{"database":"chinook","hostname":"localhost","password_secret":"","port":5432,"type":"postgres","use_ipv6":false,"username":"mark.cotner","variable":"conn"},"chunks":null,"kind":"Elixir.KinoDB.ConnectionCell","livebook_object":"smart_cell"} -->
 
 ```elixir
@@ -25,10 +31,6 @@ opts = [
 
 {:ok, conn} = Kino.start_child({Postgrex, opts})
 ```
-
-### Metadata for Report
-
-<!-- livebook:{"break_markdown":true} -->
 
 ### Full Version
 
@@ -62,6 +64,10 @@ major_and_minor =
     []
   )
 ```
+
+### Version Comparison
+
+This gets the latest version of PostgreSQL and compares it to yours.
 
 ```elixir
 Application.ensure_all_started(:inets)
@@ -474,7 +480,13 @@ total_db_size =
   )
 ```
 
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH total_db_size AS (\n SELECT\n  sum(pg_database_size(datname))::float AS db_size\n FROM\n  pg_stat_database\n),\ntotal_buffer_size AS (\n SELECT\n  (replace(unit, 'kB', '')::int * 1024 * setting::int)::float AS buffer_size\n FROM\n  pg_settings \n WHERE\n  name = 'shared_buffers'\n)\nSELECT\n total_db_size.db_size,\n total_buffer_size.buffer_size,\n (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer\nFROM\n total_db_size\nJOIN total_buffer_size ON 1 = 1;","result_variable":"data_vs_buffer","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+### Will my database fit in available buffers?
+
+This query looks at the size of all objects in your database and compares it to available buffers.  If it is an OLTP database then all objects should fit.  If you include archiving or logging in the same database reconsider, but in that case all "hot" frequently queried data needs to fit in memory.  If it's OLAP then memory allocation should meet the query latency expectations of the end user.  If people think your OLAP db is too slow, add memory.
+
+#### Note: Third column represents the memory / buffer percentage.
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH total_db_size AS (\n SELECT\n  sum(pg_database_size(datname))::float AS db_size\n FROM\n  pg_stat_database\n),\ntotal_buffer_size AS (\n SELECT\n  (replace(unit, 'kB', '')::int * 1024 * setting::int)::float AS buffer_size\n FROM\n  pg_settings \n WHERE\n  name = 'shared_buffers'\n)\nSELECT\n total_db_size.db_size,\n total_buffer_size.buffer_size,\n (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer_percentage\nFROM\n total_db_size\nJOIN total_buffer_size ON 1 = 1;","result_variable":"data_vs_buffer","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
 data_vs_buffer =
@@ -498,7 +510,7 @@ data_vs_buffer =
     SELECT
      total_db_size.db_size,
      total_buffer_size.buffer_size,
-     (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer
+     (total_db_size.db_size + 1.0) / (total_buffer_size.buffer_size + 1.0) * 100.0 AS data_vs_buffer_percentage
     FROM
      total_db_size
     JOIN total_buffer_size ON 1 = 1;
@@ -506,6 +518,10 @@ data_vs_buffer =
     []
   )
 ```
+
+### Evaluate the results in English
+
+This section gives recommendations for buffer allocation and instance sizing.
 
 ```elixir
 # IO.inspect(data_vs_buffer)
@@ -548,7 +564,7 @@ wal_info =
 
 ## Unused Indexes
 
-Here's a list of indexes that haven't been used since statistics restarted(db restart, intentional reset of stats)
+Here is a list of indexes that haven't been used since statistics restarted(db restart, intentional reset of stats).  If you just restarted your database wait for a few days before taking this too seriously.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n  relname AS table,\n  indexrelname AS index,\n  pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,\n  idx_scan as index_scans\nFROM pg_stat_user_indexes ui\nJOIN pg_index i ON ui.indexrelid = i.indexrelid\nWHERE NOT indisunique AND idx_scan =0 AND pg_relation_size(relid) > 5 * 8192\nORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST,\npg_relation_size(i.indexrelid) DESC;","result_variable":"unused_indexes","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -589,46 +605,11 @@ for row <- unused_indexes.rows do
 end
 ```
 
-### Max Connections
-
-Maximum number of configured database connections
-
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT name, setting FROM pg_settings WHERE name = 'max_connections'","result_variable":"max_connections","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
-
-```elixir
-max_connections =
-  Postgrex.query!(
-    conn,
-    "SELECT name, setting FROM pg_settings WHERE name = 'max_connections'",
-    []
-  )
-```
-
 ## Connection Info
 
-### Max Used Connections
+### Max Used Connections with Percentage
 
-Maximum used connections since restart or stat reset.????
-
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"select  * from\n(select count(*) used from pg_stat_activity) q1,\n(select setting::int res_for_super from pg_settings where name=$$superuser_reserved_connections$$) q2,\n(select setting::int max_conn from pg_settings where name=$$max_connections$$) q3;","result_variable":"max_used_basic","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
-
-```elixir
-max_used_basic =
-  Postgrex.query!(
-    conn,
-    """
-    select  * from
-    (select count(*) used from pg_stat_activity) q1,
-    (select setting::int res_for_super from pg_settings where name=$$superuser_reserved_connections$$) q2,
-    (select setting::int max_conn from pg_settings where name=$$max_connections$$) q3;
-    """,
-    []
-  )
-```
-
-### Max Used Connections with CTE
-
-Try again with CTE so we can calculate percentages
+Current connection count vs max connections setting.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"WITH current_connections AS (\n  SELECT count(1) AS used FROM pg_stat_activity\n),\nreserved_for_super AS (\n  SELECT setting::int AS res_for_super FROM pg_settings WHERE name = 'superuser_reserved_connections'\n),\nmax_connections AS (\n  SELECT setting::int AS max_connections FROM pg_settings WHERE name = 'max_connections'\n)\nSELECT\n current_connections.used,\n reserved_for_super.res_for_super AS reserved_for_super,\n max_connections.max_connections,\n ((current_connections.used::float + 1) / (reserved_for_super.res_for_super::float + max_connections.max_connections::float + 1) * 100.0) AS pct_used\nFROM\n current_connections\nJOIN\n reserved_for_super ON 1 = 1\nJOIN\n max_connections ON 1 = 1","result_variable":"max_used","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -664,7 +645,7 @@ max_used =
 
 ### Connections per DB
 
-This is the number of active connections per DB.
+This is the number of active connections per DB.  Make sure this matches expectations.  If other groups are using your database more than you would like an API would be a good suggestion.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n datname,\n numbackends \nFROM\n pg_stat_database \nWHERE\n datname IS NOT NULL AND \n datname NOT IN ('template0', 'template1', 'postgres');","result_variable":"connections_per_db","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -701,6 +682,8 @@ VegaLite.new(width: 700, title: "Connections per DB")
 Memory/Buffer Usage information
 
 ### Buffer Pool Usage - DB
+
+How frequently are my blocks read from disk vs buffers?  If this percentage is low consider more memory or larger instance size.  This needs to be run against a database that's been up for days or months.
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT \n datname,\n blks_read AS read_from_disk,\n blks_hit AS read_from_buffer,\n ((blks_read::float + 1.0) / ((blks_read::float + blks_hit::float + 1.0)) * 100::float) AS percentage_from_disk\nFROM\n pg_stat_database\nWHERE\n datname IS NOT NULL AND\n datname NOT IN ('postgres', 'template0', 'template1')\nORDER BY 4 DESC;","result_variable":"buffer_pool_usage_db","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -739,6 +722,10 @@ VegaLite.new(width: 700, title: "Buffer Pool Usage by DB")
 
 ### Buffer Pool Usage - Tables
 
+<!-- livebook:{"break_markdown":true} -->
+
+Break down buffer usage by table.  Which of my tables fit in memory and which do not?
+
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname, \n heap_blks_read, \n heap_blks_hit,\n ((heap_blks_read::float + 1.0) / (heap_blks_read::float + heap_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk\nFROM\n pg_statio_user_tables\nORDER BY 5 DESC;","result_variable":"buffer_pool_usage_tables","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
@@ -773,6 +760,8 @@ VegaLite.new(width: 700, title: "Buffer Pool Usage by Table")
 ```
 
 ### Buffer Pool Usage - Indexes
+
+This is more important than tables.  Do all of my indexes fit in memory?  What percentage of time are they coming from memory vs disk?
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname, \n idx_blks_read, \n idx_blks_hit,\n ((idx_blks_read::float + 1.0) / (idx_blks_read::float + idx_blks_hit::float + 1.0) * 100.0) AS percentage_from_disk\nFROM\n pg_statio_user_tables\nORDER BY 5 DESC;","result_variable":"buffer_pool_usage_indexes","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
@@ -811,6 +800,8 @@ VegaLite.new(width: 700, title: "Buffer Pool Usage - Indexes")
 
 ### Index Usage By Table
 
+What percentage of my queries are using indexes broken down by table?
+
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname,\n seq_scan,\n idx_scan,\n ((seq_scan::float + 1.0) / (seq_scan::float + idx_scan::float + 1.0) * 100.0) AS seq_scan_percentage\nFROM\n pg_stat_user_tables\nORDER BY 5 DESC;","result_variable":"index_usage_by_table","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
@@ -845,6 +836,8 @@ VegaLite.new(width: 700, title: "Index Usage by Table")
 ```
 
 ### Index Usage by Index
+
+Use this to find the most used indexes
 
 <!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"query":"SELECT\n schemaname,\n relname,\n indexrelname,\n idx_scan\nFROM\n pg_stat_user_indexes\nWHERE idx_scan > 0\nORDER BY\n idx_scan DESC;","result_variable":"index_usage_by_index","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
