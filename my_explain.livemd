@@ -1,0 +1,216 @@
+<!-- livebook:{"autosave_interval_s":60} -->
+
+# Explain DB MySQL
+
+```elixir
+Mix.install([
+  {:kino_db, "~> 0.2.1"},
+  {:myxql, "~> 0.6.2"}
+])
+```
+
+## MySQL Connection Setup
+
+<!-- livebook:{"attrs":{"database":"test","hostname":"localhost","password_secret":"","port":3306,"type":"mysql","use_ipv6":false,"username":"root","variable":"conn"},"chunks":null,"kind":"Elixir.KinoDB.ConnectionCell","livebook_object":"smart_cell"} -->
+
+```elixir
+opts = [
+  hostname: "localhost",
+  port: 3306,
+  username: "root",
+  password: "",
+  database: "test"
+]
+
+{:ok, conn} = Kino.start_child({MyXQL, opts})
+```
+
+## Version Info
+
+This tool works for MySQL 8.0 and beyond only.
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"SELECT @@version AS version, @@version_comment AS version_comment, @@hostname AS hostname","result_variable":"version","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+version =
+  MyXQL.query!(
+    conn,
+    "SELECT @@version AS version, @@version_comment AS version_comment, @@hostname AS hostname",
+    []
+  )
+```
+
+```elixir
+# IO.puts IO.inspect(version.rows)
+[[ver, ver_comment, host]] = version.rows
+res = String.split(ver, ".")
+[major_version, minor_version, dot_release] = res
+
+if major_version >= 8 do
+  "Your version of MySQL is compatible with this livebook"
+else
+  "You need to upgrade your MySQL before using this livebook"
+end
+```
+
+### Server Uptime and Uptime Since Flush
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"SHOW STATUS LIKE 'Uptime'","result_variable":"uptime_query","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+uptime_query = MyXQL.query!(conn, "SHOW STATUS LIKE 'Uptime'", [])
+```
+
+```elixir
+# IO.inspect floor(586170 / 86400.0)
+# IO.inspect rem(floor((586170 / 86400) / 3600), 60)
+defmodule Uptime do
+  def uptime_presentation(uptime_raw) do
+    # IO.inspect uptime_raw
+    days = floor(uptime_raw / 86400.0)
+    hours = floor(rem(uptime_raw, 86400) / 3600.0)
+    minutes = floor(rem(rem(uptime_raw, 86400), 3600) / 60)
+    seconds = rem(rem(rem(uptime_raw, 86400), 3600), 60)
+    pretty = "Days: #{days}, Hours: #{hours}, Minutes: #{minutes}, Seconds: #{seconds}"
+    time = to_string(:io_lib.format("~2..0B:~2..0B:~2..0B", [hours, minutes, seconds]))
+    short = "#{days} days, #{time}"
+
+    %{
+      :pretty => pretty,
+      :short => short,
+      :days => days,
+      :hours => hours,
+      :minutes => minutes,
+      :seconds => seconds
+    }
+  end
+end
+
+# IO.inspect uptime_query
+[[_, uptime_raw]] = uptime_query.rows
+uptime_struct = Uptime.uptime_presentation(String.to_integer(uptime_raw))
+IO.puts("Current Uptime: #{uptime_struct.short}")
+
+if uptime_struct.days <= 1 do
+  "Your server should be running at least a day before running these evaluations"
+else
+  "Your server has been up long enough for most of these evaluations to work"
+end
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"SHOW GLOBAL STATUS LIKE 'Uptime_since_flush_status'","result_variable":"uptime_since_flush_query","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+uptime_since_flush_query =
+  MyXQL.query!(conn, "SHOW GLOBAL STATUS LIKE 'Uptime_since_flush_status'", [])
+```
+
+```elixir
+# Turn uptime_since_flush into a variable we can use 
+# IO.inspect(uptime_since_flush_query)
+[[_, uptime_since_flush]] = uptime_since_flush_query.rows
+raw_uptime_since_flush = String.to_integer(uptime_since_flush)
+uptime_since_flush = Uptime.uptime_presentation(raw_uptime_since_flush)
+IO.puts("The last flush/restart was #{uptime_since_flush.short}")
+```
+
+## MySQL Buffer Pool
+
+### InnoDB Buffer Pool Usage
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"WITH\n  data AS (SELECT count AS pages_data FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_data'),\n  misc AS (SELECT count AS pages_misc FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_misc'),\n  free AS (SELECT count AS pages_free FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_free'),\n  page_size AS (SELECT count AS page_size FROM information_schema.INNODB_METRICS WHERE name = 'innodb_page_size'),\n  data_bytes AS (SELECT data.pages_data * page_size.page_size AS data_bytes FROM data JOIN page_size),\n  misc_bytes AS (SELECT misc.pages_misc * page_size.page_size AS misc_bytes FROM misc JOIN page_size),\n  free_bytes AS (SELECT free.pages_free * page_size.page_size AS free_bytes FROM free JOIN page_size),\n  total_pages AS (SELECT data.pages_data + misc.pages_misc + free.pages_free AS total_pages FROM data JOIN misc JOIN free),\n  total_used AS (SELECT data.pages_data + misc.pages_misc AS total_used FROM data JOIN misc),\n  percent_used AS (SELECT (total_used.total_used / total_pages.total_pages) * 100 AS percent_used FROM total_pages JOIN total_used)\nSELECT\n data.pages_data,\n misc.pages_misc,\n free.pages_free,\n page_size.page_size,\n data_bytes.data_bytes,\n misc_bytes.misc_bytes,\n free_bytes.free_bytes,\n total_pages.total_pages,\n total_used.total_used,\n percent_used.percent_used\nFROM\n data \nJOIN misc \nJOIN free \nJOIN page_size\nJOIN data_bytes\nJOIN misc_bytes\nJOIN free_bytes \nJOIN total_pages \nJOIN total_used \nJOIN percent_used;","result_variable":"innodb_buffer_pool_usage","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+innodb_buffer_pool_usage =
+  MyXQL.query!(
+    conn,
+    """
+    WITH
+      data AS (SELECT count AS pages_data FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_data'),
+      misc AS (SELECT count AS pages_misc FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_misc'),
+      free AS (SELECT count AS pages_free FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_pages_free'),
+      page_size AS (SELECT count AS page_size FROM information_schema.INNODB_METRICS WHERE name = 'innodb_page_size'),
+      data_bytes AS (SELECT data.pages_data * page_size.page_size AS data_bytes FROM data JOIN page_size),
+      misc_bytes AS (SELECT misc.pages_misc * page_size.page_size AS misc_bytes FROM misc JOIN page_size),
+      free_bytes AS (SELECT free.pages_free * page_size.page_size AS free_bytes FROM free JOIN page_size),
+      total_pages AS (SELECT data.pages_data + misc.pages_misc + free.pages_free AS total_pages FROM data JOIN misc JOIN free),
+      total_used AS (SELECT data.pages_data + misc.pages_misc AS total_used FROM data JOIN misc),
+      percent_used AS (SELECT (total_used.total_used / total_pages.total_pages) * 100 AS percent_used FROM total_pages JOIN total_used)
+    SELECT
+     data.pages_data,
+     misc.pages_misc,
+     free.pages_free,
+     page_size.page_size,
+     data_bytes.data_bytes,
+     misc_bytes.misc_bytes,
+     free_bytes.free_bytes,
+     total_pages.total_pages,
+     total_used.total_used,
+     percent_used.percent_used
+    FROM
+     data 
+    JOIN misc 
+    JOIN free 
+    JOIN page_size
+    JOIN data_bytes
+    JOIN misc_bytes
+    JOIN free_bytes 
+    JOIN total_pages 
+    JOIN total_used 
+    JOIN percent_used;
+    """,
+    []
+  )
+```
+
+### InnoDB Buffer Pool Hit Ratio
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"WITH\n read_requests AS (SELECT count AS read_requests FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_read_requests'),\n all_reads AS (SELECT count AS all_reads FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_reads'),\n hit_ratio AS (SELECT (read_requests.read_requests / (read_requests.read_requests + all_reads.all_reads)) * 100 AS hit_ratio FROM all_reads JOIN read_requests)\nSELECT\n read_requests.read_requests,\n all_reads.all_reads,\n hit_ratio.hit_ratio\nFROM\n read_requests\nJOIN\n all_reads\nJOIN\n hit_ratio;","result_variable":"innodb_buffer_pool_hit_rate","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+innodb_buffer_pool_hit_rate =
+  MyXQL.query!(
+    conn,
+    """
+    WITH
+     read_requests AS (SELECT count AS read_requests FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_read_requests'),
+     all_reads AS (SELECT count AS all_reads FROM information_schema.INNODB_METRICS WHERE name = 'buffer_pool_reads'),
+     hit_ratio AS (SELECT (read_requests.read_requests / (read_requests.read_requests + all_reads.all_reads)) * 100 AS hit_ratio FROM all_reads JOIN read_requests)
+    SELECT
+     read_requests.read_requests,
+     all_reads.all_reads,
+     hit_ratio.hit_ratio
+    FROM
+     read_requests
+    JOIN
+     all_reads
+    JOIN
+     hit_ratio;
+    """,
+    []
+  )
+```
+
+## Performance Section
+
+### Grab Global Status for Remaining Formulas
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"SHOW GLOBAL STATUS","result_variable":"gs","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+gs = MyXQL.query!(conn, "SHOW GLOBAL STATUS", [])
+```
+
+```elixir
+# :ets.new(:status, [:public, :named_table])
+
+Enum.each(gs.rows, fn [key, value] -> :ets.insert(:status, {key, value}) end)
+[result] = :ets.lookup(:status, "Uptime")
+IO.inspect(result["Uptime"])
+# |> Enum.chunk_every(2)
+# |> Enum.into(%{}, fn [a, b] -> {a, b} end)
+
+# [1,2,3,4]
+# |> Enum.chunk_every(2)
+# |> Map.new(fn [k, v] -> {k, v} end)
+```
