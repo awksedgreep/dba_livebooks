@@ -202,15 +202,9 @@ gs = MyXQL.query!(conn, "SHOW GLOBAL STATUS", [])
 ```
 
 ```elixir
-# :ets.new(:status, [:public, :named_table])
+:ets.new(:status, [:public, :named_table])
 
 Enum.each(gs.rows, fn [key, value] -> :ets.insert(:status, {key, value}) end)
 [result] = :ets.lookup(:status, "Uptime")
 IO.inspect(result["Uptime"])
-# |> Enum.chunk_every(2)
-# |> Enum.into(%{}, fn [a, b] -> {a, b} end)
-
-# [1,2,3,4]
-# |> Enum.chunk_every(2)
-# |> Map.new(fn [k, v] -> {k, v} end)
 ```

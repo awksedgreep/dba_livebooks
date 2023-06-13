@@ -987,4 +987,4 @@ result =
   )
 ```
 
-The bloat queries above are modified versions of the queries found [here](https://github.com/ioguix/pgsql-bloat-estimation) with the license [here](https://github.com/ioguix/pgsql-bloat-estimation/blob/master/LICENSE).
+The bloat queries above are modified versions of the queries found [here](https://github.com/ioguix/pgsql-bloat-estimation) with the license [here](https://github.com/ioguix/pgsql-bloat-estimation/blob/master/LICENSE).  It should be noted others have included these with a warning that they may be ~10-15% inaccurate.  Once better queries for bloat are devised they will be included here.
