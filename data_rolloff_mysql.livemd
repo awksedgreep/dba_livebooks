@@ -41,7 +41,7 @@ result3 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry;", [])
 result4 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry_archive;", [])
 ```
 
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"\nCREATE TABLE IF NOT EXISTS `error_retry` (\n  `id` bigint(20) NOT NULL AUTO_INCREMENT,\n  `message_id` varchar(64) NOT NULL,\n  `group_id` varchar(128) DEFAULT NULL,\n  `queue_name` varchar(128) DEFAULT NULL,\n  `body` blob,\n  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `num_retries` int(11) DEFAULT '1',\n  PRIMARY KEY (`id`),\n  KEY `IDX_ERROR_RETRY_MESSAGE_ID_CS` (`message_id`)\n) ENGINE=InnoDB AUTO_INCREMENT=3266592 DEFAULT CHARSET=utf8;","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"\n-- Table def goes here","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
 result =
@@ -49,18 +49,7 @@ result =
     conn,
     """
 
-    CREATE TABLE IF NOT EXISTS `error_retry` (
-      `id` bigint(20) NOT NULL AUTO_INCREMENT,
-      `message_id` varchar(64) NOT NULL,
-      `group_id` varchar(128) DEFAULT NULL,
-      `queue_name` varchar(128) DEFAULT NULL,
-      `body` blob,
-      `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      `num_retries` int(11) DEFAULT '1',
-      PRIMARY KEY (`id`),
-      KEY `IDX_ERROR_RETRY_MESSAGE_ID_CS` (`message_id`)
-    ) ENGINE=InnoDB AUTO_INCREMENT=3266592 DEFAULT CHARSET=utf8;
+    -- Table def goes here
     """,
     []
   )
