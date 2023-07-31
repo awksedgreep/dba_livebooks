@@ -1,0 +1,493 @@
+<!-- livebook:{"autosave_interval_s":30} -->
+
+# MySQL Partitioning with Rolloff
+
+```elixir
+Mix.install([
+  {:kino_db, "~> 0.2.1"},
+  {:myxql, "~> 0.6.2"}
+])
+```
+
+## Lower Env Table Setup
+
+#### Set up your database connection for testing
+
+<!-- livebook:{"attrs":{"database":"toe_production","hostname":"localhost","password_secret":"","port":3306,"type":"mysql","use_ipv6":false,"username":"root","variable":"conn"},"chunks":null,"kind":"Elixir.KinoDB.ConnectionCell","livebook_object":"smart_cell"} -->
+
+```elixir
+opts = [
+  hostname: "localhost",
+  port: 3306,
+  username: "root",
+  password: "",
+  database: "toe_production"
+]
+
+{:ok, conn} = Kino.start_child({MyXQL, opts})
+```
+
+#### Create Table if it doesn't exist in test env
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"DROP TABLE IF EXISTS error_retry;","result_variable":"result3","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result3 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry;", [])
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"DROP TABLE IF EXISTS error_retry_archive;","result_variable":"result4","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result4 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry_archive;", [])
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"\nCREATE TABLE IF NOT EXISTS `error_retry` (\n  `id` bigint(20) NOT NULL AUTO_INCREMENT,\n  `message_id` varchar(64) NOT NULL,\n  `group_id` varchar(128) DEFAULT NULL,\n  `queue_name` varchar(128) DEFAULT NULL,\n  `body` blob,\n  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  `num_retries` int(11) DEFAULT '1',\n  PRIMARY KEY (`id`),\n  KEY `IDX_ERROR_RETRY_MESSAGE_ID_CS` (`message_id`)\n) ENGINE=InnoDB AUTO_INCREMENT=3266592 DEFAULT CHARSET=utf8;","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result =
+  MyXQL.query!(
+    conn,
+    """
+
+    CREATE TABLE IF NOT EXISTS `error_retry` (
+      `id` bigint(20) NOT NULL AUTO_INCREMENT,
+      `message_id` varchar(64) NOT NULL,
+      `group_id` varchar(128) DEFAULT NULL,
+      `queue_name` varchar(128) DEFAULT NULL,
+      `body` blob,
+      `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      `num_retries` int(11) DEFAULT '1',
+      PRIMARY KEY (`id`),
+      KEY `IDX_ERROR_RETRY_MESSAGE_ID_CS` (`message_id`)
+    ) ENGINE=InnoDB AUTO_INCREMENT=3266592 DEFAULT CHARSET=utf8;
+    """,
+    []
+  )
+```
+
+#### Pseudocode for archive and partition
+
+1. Ask user about table, how much data to keep, update field, partition size, etc
+2. Create partition as temp table
+3. First pass of data copy into table
+4. Big Delta using update field
+5. Small Delta using update field
+6. Lock table
+7. Rename table to archive
+8. Rename temp partition table to table name
+9. Third delta for any changes before lock
+10. Unlock tables
+11. Optionally remove duplicate data from archive
+12. Optionally compress archive
+13. Optionally create union all view in front of all data
+14. Optionally include self managing scheduled job
+
+<!-- livebook:{"break_markdown":true} -->
+
+#### Todo:
+
+1. Port existing SQL procedure to Elixir
+2. Modify for table archive
+3. Include options for rolloff
+4. Include options for compression
+5. Include options for remove dups
+6. Include self managing jobs
+7. Include option for partition sizes other than 1 month
+
+## Configure data rolloff
+
+```elixir
+# Configuration
+# Would you like to roll off some data or keep all? 0 = keep all, 1 = roll off
+roll_off = 1
+
+# Days of data to keep in new table/partition (don't forget leap year)
+days_to_keep = 730
+
+# partition size (not implemented yet)
+partition_size = "monthly"
+
+# table to roll off
+tablename = "error_retry"
+
+# date column to use 
+date_column = "updated_at"
+
+# id column
+id_column = "id"
+```
+
+## Create Rolloff SQL
+
+
+
+```elixir
+# Clean up from previous run if necessary
+output = ""
+sql = "DROP TABLE IF EXISTS ota_" <> tablename
+output = output <> sql <> ";\n"
+sql = "DROP TABLE IF EXISTS ota_id_list_" <> tablename
+output = output <> sql <> ";\n"
+sql = "DROP TABLE IF EXISTS ota_id_list2_" <> tablename
+output = output <> sql <> ";\n"
+
+# Build SQL for create table like
+sql = "CREATE TABLE ota_" <> tablename <> " LIKE " <> tablename
+output = output <> sql <> ";\n"
+
+# Build alter table statement to prepare for partitioning
+sql =
+  "ALTER TABLE ota_" <>
+    tablename <> " MODIFY " <> id_column <> " bigint not null, DROP PRIMARY KEY"
+
+output = output <> sql <> ";\n"
+
+sql = "ALTER TABLE ota_" <> tablename <> " ADD KEY id(id)"
+output = output <> sql <> ";\n"
+
+sql = "ALTER TABLE ota_" <> tablename <> " MODIFY id bigint not null auto_increment"
+output = output <> sql <> ";\n"
+
+# Now to partition new table
+sql = "ALTER TABLE ota_" <> tablename <> "\n"
+output = output <> sql
+sql = "PARTITION BY RANGE (extract(year_month FROM " <> date_column <> "))\n"
+output = output <> sql
+sql = "(\n"
+output = output <> sql
+
+# Current year
+date = Date.utc_today()
+current_year = date.year
+current_month_string = String.pad_leading(to_string(date.month), 2, "0")
+current_month = date.month
+start_date = Date.add(date, -days_to_keep)
+start_month = start_date.month
+start_month_string = String.pad_leading(to_string(start_month), 2, "0")
+start_year = start_date.year
+start_month = current_month
+
+date_range = Date.range(start_date, date)
+months = Enum.filter(date_range, fn date -> Date.beginning_of_month(date) == date end)
+months = [Date.beginning_of_month(start_date) | months]
+# IO.inspect months
+partitions =
+  Enum.map(months, fn month ->
+    format_date = to_string(month.year) <> String.pad_leading(to_string(month.month), 2, "0")
+    next_date = Date.add(month, 33)
+
+    format_next_date =
+      to_string(next_date.year) <> String.pad_leading(to_string(next_date.month), 2, "0")
+
+    _sql = "  PARTITION p" <> format_date <> " VALUES LESS THAN (" <> format_next_date <> "),\n"
+  end)
+
+IO.puts(output)
+IO.puts(partitions)
+IO.puts("  PARTITION pFuture VALUES LESS THAN MAXVALUE\n);")
+
+# Insert into new table
+IO.puts(
+  "INSERT INTO ota_" <>
+    tablename <>
+    " SELECT * FROM " <>
+    tablename <> " WHERE " <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+# Process any new deletes
+IO.puts(
+  "DELETE ota_" <>
+    tablename <>
+    " FROM ota_" <>
+    tablename <>
+    " LEFT JOIN " <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " IS NULL AND " <>
+    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+# Process any new updates by deleting and repopulating
+IO.puts(
+  "DELETE ota_" <>
+    tablename <>
+    " FROM ota_" <>
+    tablename <>
+    " LEFT JOIN " <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE ota_" <>
+    tablename <> "." <> date_column <> " != " <> tablename <> "." <> date_column <> ";"
+)
+
+# Populate missing rows, deletes, etc (last pass before lock)
+IO.puts(
+  "CREATE TEMPORARY TABLE ota_id_list2_" <>
+    tablename <>
+    " SELECT " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " FROM " <>
+    tablename <>
+    " LEFT JOIN ota_" <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " IS NULL AND " <>
+    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+IO.puts(
+  "INSERT INTO ota_" <>
+    tablename <>
+    " SELECT " <>
+    tablename <>
+    ".* FROM " <>
+    tablename <>
+    " JOIN ota_id_list2_" <>
+    tablename <>
+    " ON " <>
+    tablename <> "." <> id_column <> " = ota_id_list2_" <> tablename <> "." <> id_column <> ";"
+)
+
+# Lock tables, one more pass
+IO.puts("LOCK TABLES " <> tablename <> " WRITE, ota_" <> tablename <> " WRITE;")
+
+# Process any new deletes
+IO.puts(
+  "DELETE ota_" <>
+    tablename <>
+    " FROM ota_" <>
+    tablename <>
+    " LEFT JOIN " <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " IS NULL AND " <>
+    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+# Process any new updates by deleting and repopulating
+IO.puts(
+  "DELETE ota_" <>
+    tablename <>
+    " FROM ota_" <>
+    tablename <>
+    " LEFT JOIN " <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE ota_" <>
+    tablename <> "." <> date_column <> " != " <> tablename <> "." <> date_column <> ";"
+)
+
+# Populate missing rows, deletes, etc
+IO.puts(
+  "CREATE TEMPORARY TABLE ota_id_list_" <>
+    tablename <>
+    " SELECT " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " FROM " <>
+    tablename <>
+    " LEFT JOIN ota_" <>
+    tablename <>
+    " ON " <>
+    tablename <>
+    "." <>
+    id_column <>
+    " = ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " WHERE ota_" <>
+    tablename <>
+    "." <>
+    id_column <>
+    " IS NULL AND " <>
+    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+IO.puts(
+  "INSERT INTO ota_" <>
+    tablename <>
+    " SELECT " <>
+    tablename <>
+    ".* FROM " <>
+    tablename <>
+    " JOIN ota_id_list_" <>
+    tablename <>
+    " ON " <>
+    tablename <> "." <> id_column <> " = ota_id_list_" <> tablename <> "." <> id_column <> ";"
+)
+
+# Rotate tables out
+IO.puts("ALTER TABLE " <> tablename <> " RENAME TO " <> tablename <> "_archive;")
+IO.puts("ALTER TABLE ota_" <> tablename <> " RENAME TO " <> tablename <> ";")
+
+# Unlock tables 
+IO.puts("UNLOCK TABLES;")
+
+# Update table statistics
+IO.puts("ANALYZE TABLE " <> tablename <> ";")
+
+# Remove rows in new partition from archive
+IO.puts(
+  "DELETE FROM " <>
+    tablename <> "_archive WHERE " <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+)
+
+# Compress archive
+IO.puts("ALTER TABLE " <> tablename <> "_archive ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=16;")
+
+# Analyze the archive table
+IO.puts("ANALYZE TABLE " <> tablename <> "_archive;")
+```
+
+## Code that self manages the table rolloff
+
+```sql
+
+-- This procedure appends a new partition at the end of the month to existing tables
+-- Example usage:  CALL append_partition('error_retry');
+
+delimiter //
+
+drop procedure if exists append_partition//
+create procedure append_partition(tablename varchar(255)) modifies sql data
+begin
+  SELECT extract(year_month from date_add(now(), interval 25 day)) INTO @nextmonth;
+  SELECT extract(year_month from date_add(now(), interval 50 day)) INTO @monthafternext;
+  set @q = concat("ALTER TABLE ", tablename, " REORGANIZE PARTITION pFuture INTO (PARTITION p", @nextmonth, " VALUES LESS THAN (", @monthafternext, "), PARTITION pFuture VALUES LESS THAN MAXVALUE)");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+end//
+
+-- This procedure rolls off the first partition in the series to a regular table and compresses it
+-- Example usage: CALL archive_partition('error_retry');
+
+
+drop procedure if exists archive_partition//
+create procedure archive_partition(tablename varchar(255)) modifies sql data
+begin
+  set @q = concat("SELECT partition_name INTO @first_part FROM information_schema.partitions WHERE table_schema = database() AND table_name = '", tablename, "' AND partition_ordinal_position = 1");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+
+  set @q = concat("CREATE TABLE ", tablename, @first_part, " LIKE error_retry");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+  set @q = concat("ALTER TABLE ", tablename, @first_part, " REMOVE PARTITIONING");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+  set @q = concat("INSERT INTO ", tablename, @first_part, " SELECT * FROM ", tablename, " PARTITION (", @first_part, ")");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+  set @q = concat("ALTER TABLE ", tablename, @first_part, " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=16");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+  set @q = concat("ALTER TABLE ", tablename, " DROP PARTITION ", @first_part);
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+  CREATE TABLE IF NOT EXISTS union_all_tables (id bigint not null primary key auto_increment, primary_table varchar(255), archive_table varchar(255), key primary_table(primary_table), key archive_table(archive_table));
+  
+  set @q = concat("INSERT INTO union_all_tables (primary_table, archive_table) VALUES ('", tablename, "', '", tablename, @first_part, "')");
+  prepare q from @q;
+  execute q;
+  deallocate prepare q;
+  
+end//
+
+delimiter ;
+```
+
+## Schedule events to automatically maintain the tables
+
+```elixir
+IO.puts("-- Jobs to maintain partitions for you")
+
+IO.puts(
+  "-- You can modify execution times, but make sure you run them close to the end of the month"
+)
+
+IO.puts("DELIMITER //")
+IO.puts("DROP EVENT IF EXISTS #{tablename}_append//")
+
+IO.puts(
+  "CREATE EVENT #{tablename}_append on schedule every '1' month starts '2016-01-27 00:00:00'"
+)
+
+IO.puts("do")
+IO.puts("  CALL append_partition('#{tablename}')//")
+IO.puts("DELIMITER ;")
+
+IO.puts("DELIMITER //")
+IO.puts("DROP EVENT IF EXISTS #{tablename}_archive//")
+
+IO.puts(
+  "CREATE EVENT #{tablename}_archive on schedule every '1' month starts '2016-01-27 00:00:00'"
+)
+
+IO.puts("do")
+IO.puts("  CALL archive_partition('#{tablename}')//")
+IO.puts("DELIMITER ;")
+```
