@@ -76,19 +76,13 @@ result =
 
 #### Todo:
 
-1. Port existing SQL procedure to Elixir
-2. Modify for table archive
-3. Include options for rolloff
-4. Include options for compression
-5. Include options for remove dups
-6. Include self managing jobs
-7. Include option for partition sizes other than 1 month
+1. Include option for partition sizes other than 1 month
 
 ## Configure data rolloff
 
 ```elixir
 # Configuration
-# Would you like to roll off some data or keep all? 0 = keep all, 1 = roll off
+# Would you like to roll off some data or keep all? 0 = keep all, 1 = roll off (not implemented)
 roll_off = 1
 
 # Days of data to keep in new table/partition (don't forget leap year)
@@ -98,10 +92,13 @@ days_to_keep = 730
 partition_size = "monthly"
 
 # table to roll off
-tablename = "error_retry"
+tablename = "pull_audit_table"
 
-# date column to use 
-date_column = "updated_at"
+# date column for inserts 
+date_column = "created_at"
+
+# date column for updates, leave empty string for append only tables 
+update_column = ""
 
 # id column
 id_column = "id"
@@ -113,38 +110,22 @@ id_column = "id"
 
 ```elixir
 # Clean up from previous run if necessary
-output = ""
-sql = "DROP TABLE IF EXISTS ota_" <> tablename
-output = output <> sql <> ";\n"
-sql = "DROP TABLE IF EXISTS ota_id_list_" <> tablename
-output = output <> sql <> ";\n"
-sql = "DROP TABLE IF EXISTS ota_id_list2_" <> tablename
-output = output <> sql <> ";\n"
+IO.puts("DROP TABLE IF EXISTS ota_#{tablename};\n")
+IO.puts("DROP TABLE IF EXISTS ota_id_list_#{tablename};\n")
+IO.puts("DROP TABLE IF EXISTS ota_id_list2_#{tablename};\n")
 
 # Build SQL for create table like
-sql = "CREATE TABLE ota_" <> tablename <> " LIKE " <> tablename
-output = output <> sql <> ";\n"
+IO.puts("CREATE TABLE ota_#{tablename} LIKE #{tablename};\n")
 
 # Build alter table statement to prepare for partitioning
-sql =
-  "ALTER TABLE ota_" <>
-    tablename <> " MODIFY " <> id_column <> " bigint not null, DROP PRIMARY KEY"
+IO.puts("ALTER TABLE ota_#{tablename} MODIFY #{id_column} bigint not null, DROP PRIMARY KEY;\n")
+IO.puts("ALTER TABLE ota_#{tablename} ADD KEY id(id);\n")
 
-output = output <> sql <> ";\n"
-
-sql = "ALTER TABLE ota_" <> tablename <> " ADD KEY id(id)"
-output = output <> sql <> ";\n"
-
-sql = "ALTER TABLE ota_" <> tablename <> " MODIFY id bigint not null auto_increment"
-output = output <> sql <> ";\n"
+IO.puts("ALTER TABLE ota_#{tablename} MODIFY id bigint not null auto_increment;\m")
 
 # Now to partition new table
-sql = "ALTER TABLE ota_" <> tablename <> "\n"
-output = output <> sql
-sql = "PARTITION BY RANGE (extract(year_month FROM " <> date_column <> "))\n"
-output = output <> sql
-sql = "(\n"
-output = output <> sql
+IO.puts("ALTER TABLE ota_#{tablename}\n")
+IO.puts("PARTITION BY RANGE (extract(year_month FROM #{date_column}))\n(\n")
 
 # Current year
 date = Date.utc_today()
@@ -172,212 +153,86 @@ partitions =
     _sql = "  PARTITION p" <> format_date <> " VALUES LESS THAN (" <> format_next_date <> "),\n"
   end)
 
-IO.puts(output)
 IO.puts(partitions)
 IO.puts("  PARTITION pFuture VALUES LESS THAN MAXVALUE\n);")
 
 # Insert into new table
 IO.puts(
-  "INSERT INTO ota_" <>
-    tablename <>
-    " SELECT * FROM " <>
-    tablename <> " WHERE " <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+  "INSERT INTO ota_#{tablename} SELECT * FROM #{tablename} WHERE #{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
 # Process any new deletes
 IO.puts(
-  "DELETE ota_" <>
-    tablename <>
-    " FROM ota_" <>
-    tablename <>
-    " LEFT JOIN " <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " IS NULL AND " <>
-    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+  "DELETE ota_#{tablename} FROM ota_#{tablename} LEFT JOIN #{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE #{tablename}.#{id_column} IS NULL AND #{tablename}.#{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
-# Process any new updates by deleting and repopulating
-IO.puts(
-  "DELETE ota_" <>
-    tablename <>
-    " FROM ota_" <>
-    tablename <>
-    " LEFT JOIN " <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE ota_" <>
-    tablename <> "." <> date_column <> " != " <> tablename <> "." <> date_column <> ";"
-)
+if update_column != "" do
+  # Process any new updates by deleting and repopulating
+  IO.puts(
+    "DELETE ota_#{tablename} FROM ota_#{tablename} LEFT JOIN #{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE ota_#{tablename}.#{update_column} != #{tablename}.#{update_column};"
+  )
 
-# Populate missing rows, deletes, etc (last pass before lock)
-IO.puts(
-  "CREATE TEMPORARY TABLE ota_id_list2_" <>
-    tablename <>
-    " SELECT " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " FROM " <>
-    tablename <>
-    " LEFT JOIN ota_" <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " IS NULL AND " <>
-    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
-)
+  # Populate missing rows, deletes, etc (last pass before lock)
+  IO.puts(
+    "CREATE TEMPORARY TABLE ota_id_list2_#{tablename} SELECT #{tablename}.#{id_column} FROM #{tablename} LEFT JOIN ota_#{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE ota_#{tablename}.#{id_column} IS NULL AND #{tablename}.#{update_column} >= '#{Date.to_string(start_date)}';"
+  )
 
-IO.puts(
-  "INSERT INTO ota_" <>
-    tablename <>
-    " SELECT " <>
-    tablename <>
-    ".* FROM " <>
-    tablename <>
-    " JOIN ota_id_list2_" <>
-    tablename <>
-    " ON " <>
-    tablename <> "." <> id_column <> " = ota_id_list2_" <> tablename <> "." <> id_column <> ";"
-)
+  IO.puts(
+    "INSERT INTO ota_#{tablename} SELECT #{tablename}.* FROM #{tablename} JOIN ota_id_list2_#{tablename} ON #{tablename}.#{id_column} = ota_id_list2_#{tablename}.#{id_column};"
+  )
+else
+  # Populate missing rows, deletes, etc (last pass before lock)
+  IO.puts(
+    "CREATE TEMPORARY TABLE ota_id_list2_#{tablename} SELECT #{tablename}.#{id_column} FROM #{tablename} LEFT JOIN ota_#{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE ota_#{tablename}.#{id_column} IS NULL AND #{tablename}.#{date_column} >= '#{Date.to_string(start_date)}';"
+  )
+
+  IO.puts(
+    "INSERT INTO ota_#{tablename} SELECT #{tablename}.* FROM #{tablename} JOIN ota_id_list2_#{tablename} ON #{tablename}.#{id_column} = ota_id_list2_#{tablename}.#{id_column};"
+  )
+end
 
 # Lock tables, one more pass
-IO.puts("LOCK TABLES " <> tablename <> " WRITE, ota_" <> tablename <> " WRITE;")
+IO.puts("LOCK TABLES #{tablename} WRITE, ota_#{tablename} WRITE;")
 
 # Process any new deletes
 IO.puts(
-  "DELETE ota_" <>
-    tablename <>
-    " FROM ota_" <>
-    tablename <>
-    " LEFT JOIN " <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " IS NULL AND " <>
-    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+  "DELETE ota_#{tablename} FROM ota_#{tablename} LEFT JOIN #{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE #{tablename}.#{id_column} IS NULL AND #{tablename}.#{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
 # Process any new updates by deleting and repopulating
 IO.puts(
-  "DELETE ota_" <>
-    tablename <>
-    " FROM ota_" <>
-    tablename <>
-    " LEFT JOIN " <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE ota_" <>
-    tablename <> "." <> date_column <> " != " <> tablename <> "." <> date_column <> ";"
+  "DELETE ota_#{tablename} FROM ota_#{tablename} LEFT JOIN #{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE ota_#{tablename}.#{date_column} != #{tablename}.#{date_column};"
 )
 
 # Populate missing rows, deletes, etc
 IO.puts(
-  "CREATE TEMPORARY TABLE ota_id_list_" <>
-    tablename <>
-    " SELECT " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " FROM " <>
-    tablename <>
-    " LEFT JOIN ota_" <>
-    tablename <>
-    " ON " <>
-    tablename <>
-    "." <>
-    id_column <>
-    " = ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " WHERE ota_" <>
-    tablename <>
-    "." <>
-    id_column <>
-    " IS NULL AND " <>
-    tablename <> "." <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+  "CREATE TEMPORARY TABLE ota_id_list_#{tablename} SELECT #{tablename}.#{id_column} FROM #{tablename} LEFT JOIN ota_#{tablename} ON #{tablename}.#{id_column} = ota_#{tablename}.#{id_column} WHERE ota_#{tablename}.#{id_column} IS NULL AND #{tablename}.#{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
 IO.puts(
-  "INSERT INTO ota_" <>
-    tablename <>
-    " SELECT " <>
-    tablename <>
-    ".* FROM " <>
-    tablename <>
-    " JOIN ota_id_list_" <>
-    tablename <>
-    " ON " <>
-    tablename <> "." <> id_column <> " = ota_id_list_" <> tablename <> "." <> id_column <> ";"
+  "INSERT INTO ota_#{tablename} SELECT #{tablename}.* FROM #{tablename} JOIN ota_id_list_#{tablename} ON #{tablename}.#{id_column} = ota_id_list_#{tablename}.#{id_column};"
 )
 
 # Rotate tables out
-IO.puts("ALTER TABLE " <> tablename <> " RENAME TO " <> tablename <> "_archive;")
-IO.puts("ALTER TABLE ota_" <> tablename <> " RENAME TO " <> tablename <> ";")
+IO.puts("ALTER TABLE #{tablename} RENAME TO #{tablename}_archive;")
+IO.puts("ALTER TABLE ota_#{tablename} RENAME TO #{tablename};")
 
 # Unlock tables 
 IO.puts("UNLOCK TABLES;")
 
 # Update table statistics
-IO.puts("ANALYZE TABLE " <> tablename <> ";")
+IO.puts("ANALYZE TABLE #{tablename};")
 
 # Remove rows in new partition from archive
 IO.puts(
-  "DELETE FROM " <>
-    tablename <> "_archive WHERE " <> date_column <> " >= '" <> Date.to_string(start_date) <> "';"
+  "DELETE FROM #{tablename}_archive WHERE #{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
 # Compress archive
-IO.puts("ALTER TABLE " <> tablename <> "_archive ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=16;")
+IO.puts("ALTER TABLE #{tablename}_archive ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=16;")
 
 # Analyze the archive table
-IO.puts("ANALYZE TABLE " <> tablename <> "_archive;")
+IO.puts("ANALYZE TABLE #{tablename}_archive;")
 ```
 
 ## Code that self manages the table rolloff
