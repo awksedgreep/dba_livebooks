@@ -92,13 +92,13 @@ days_to_keep = 730
 partition_size = "monthly"
 
 # table to roll off
-tablename = "pull_audit_table"
+tablename = "error_retry"
 
 # date column for inserts 
 date_column = "created_at"
 
 # date column for updates, leave empty string for append only tables 
-update_column = ""
+update_column = "updated_at"
 
 # id column
 id_column = "id"
@@ -121,7 +121,7 @@ IO.puts("CREATE TABLE ota_#{tablename} LIKE #{tablename};\n")
 IO.puts("ALTER TABLE ota_#{tablename} MODIFY #{id_column} bigint not null, DROP PRIMARY KEY;\n")
 IO.puts("ALTER TABLE ota_#{tablename} ADD KEY id(id);\n")
 
-IO.puts("ALTER TABLE ota_#{tablename} MODIFY id bigint not null auto_increment;\m")
+IO.puts("ALTER TABLE ota_#{tablename} MODIFY id bigint not null auto_increment;\n")
 
 # Now to partition new table
 IO.puts("ALTER TABLE ota_#{tablename}\n")
