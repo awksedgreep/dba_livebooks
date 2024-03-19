@@ -202,9 +202,23 @@ gs = MyXQL.query!(conn, "SHOW GLOBAL STATUS", [])
 ```
 
 ```elixir
-:ets.new(:status, [:public, :named_table])
+# :ets.new(:status, [:public, :named_table])
 
 Enum.each(gs.rows, fn [key, value] -> :ets.insert(:status, {key, value}) end)
-[result] = :ets.lookup(:status, "Uptime")
-IO.inspect(result["Uptime"])
+[result] = :ets.lookup(:status, "Aborted_clients")
+IO.inspect(result)
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"SHOW GLOBAL VARIABLES;","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result = MyXQL.query!(conn, "SHOW GLOBAL VARIABLES;", [])
+```
+
+```elixir
+:ets.new(:vars, [:public, :named_table])
+
+Enum.each(gv.rows, fn [key, value] -> :ets.insert(:status, {key, value}) end)
+[result] = :ets.lookup(:status, "admin_port")
+IO.inspect(result)
 ```

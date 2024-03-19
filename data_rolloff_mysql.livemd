@@ -41,18 +41,10 @@ result3 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry;", [])
 result4 = MyXQL.query!(conn, "DROP TABLE IF EXISTS error_retry_archive;", [])
 ```
 
-<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"\n-- Table def goes here","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"mysql","variable":"conn"},"query":"select 1","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
 
 ```elixir
-result =
-  MyXQL.query!(
-    conn,
-    """
-
-    -- Table def goes here
-    """,
-    []
-  )
+result = MyXQL.query!(conn, "select 1", [])
 ```
 
 #### Pseudocode for archive and partition
@@ -92,7 +84,7 @@ days_to_keep = 730
 partition_size = "monthly"
 
 # table to roll off
-tablename = "error_retry"
+tablename = "orbit_requests"
 
 # date column for inserts 
 date_column = "created_at"
@@ -105,8 +97,6 @@ id_column = "id"
 ```
 
 ## Create Rolloff SQL
-
-
 
 ```elixir
 # Clean up from previous run if necessary
@@ -228,11 +218,11 @@ IO.puts(
   "DELETE FROM #{tablename}_archive WHERE #{date_column} >= '#{Date.to_string(start_date)}';"
 )
 
-# Compress archive
-IO.puts("ALTER TABLE #{tablename}_archive ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=16;")
+# Compress archive (no compression support in aurora)
+# IO.puts("ALTER TABLE #{tablename}_archive ROW_FORMAT=COMPRESSED, KEY_BLOCK_SIZE=16;")
 
 # Analyze the archive table
-IO.puts("ANALYZE TABLE #{tablename}_archive;")
+IO.puts("OPTIMIZE TABLE #{tablename}_archive;")
 ```
 
 ## Code that self manages the table rolloff
@@ -267,7 +257,7 @@ begin
   execute q;
   deallocate prepare q;
 
-  set @q = concat("CREATE TABLE ", tablename, @first_part, " LIKE error_retry");
+  set @q = concat("CREATE TABLE ", tablename, @first_part, " LIKE ", tablename);
   prepare q from @q;
   execute q;
   deallocate prepare q;
@@ -282,10 +272,10 @@ begin
   execute q;
   deallocate prepare q;
   
-  set @q = concat("ALTER TABLE ", tablename, @first_part, " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=16");
-  prepare q from @q;
-  execute q;
-  deallocate prepare q;
+  -- set @q = concat("ALTER TABLE ", tablename, @first_part, " ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=16");
+  -- prepare q from @q;
+  -- execute q;
+  -- deallocate prepare q;
   
   set @q = concat("ALTER TABLE ", tablename, " DROP PARTITION ", @first_part);
   prepare q from @q;

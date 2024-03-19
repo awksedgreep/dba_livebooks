@@ -1,0 +1,14 @@
+# Dynamic Union All Views MySQL
+
+## Section
+
+* for each table in primary table, list of tables in union_all_tables
+* create temporary table with fields from all tables using information_schema.columns
+* select distinct column name from temp table self join temp table with each table
+* if clause inserts empty string for null self join result on right side of join
+* build column clause of each union all table for the view
+* build and execute union all view creation from all tables included with columns from each
+
+```elixir
+
+```

@@ -1,0 +1,69 @@
+# Pseudocode Vault
+
+```elixir
+Mix.install([
+  {:postgrex, "~> 0.17.3"},
+  {:kino, "~> 0.10.0"},
+  {:kino_db, "~> 0.2.1"}
+])
+```
+
+## Section
+
+<!-- livebook:{"attrs":{"database":"chinook","hostname":"localhost","password_secret":"","port":5432,"type":"postgres","use_ipv6":false,"use_ssl":false,"username":"mark.cotner","variable":"conn"},"chunks":null,"kind":"Elixir.KinoDB.ConnectionCell","livebook_object":"smart_cell"} -->
+
+```elixir
+opts = [
+  hostname: "localhost",
+  port: 5432,
+  username: "mark.cotner",
+  password: "",
+  database: "chinook"
+]
+
+{:ok, conn} = Kino.start_child({Postgrex, opts})
+```
+
+#### Tasks
+
+* remove any half created tables
+* create archive table like original
+* set fields required for months of rolloff, table name, date field, int size for date field, etc
+* for each chunk roll off data in 2k chunks from 0 to int size where date > start_date
+* remove rows from original table
+* remove free space from orignal table
+* recompute statistics for original table and archive
+* union all views
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"data_frame_alias":"Elixir.Explorer.DataFrame","query":"CREATE OR REPLACE PROCEDURE archive_data(tbl TEXT, chunk_size INT, max_id INT, flter TEXT) AS $$\n  DECLARE \n    last_max INT;\n  BEGIN\n    last_max := 1 + chunk_size;\n    FOR i IN 1..max_id BY chunk_size \n    LOOP\n      BEGIN\n        RAISE DEBUG 'INSERT INTO %_archive SELECT * FROM % WHERE id >= % AND id < % AND %', tbl, tbl, i, last_max, flter;\n        execute 'INSERT INTO ' || tbl || '_archive SELECT * FROM ' || tbl || ' WHERE id >= ' || i || 'AND id < ' || last_max || ' AND ' || flter;\n      END;\n      last_max := last_max + chunk_size;\n    END LOOP;\n  END\n$$ LANGUAGE plpgsql;","result_variable":"result","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result =
+  Postgrex.query!(
+    conn,
+    """
+    CREATE OR REPLACE PROCEDURE archive_data(tbl TEXT, chunk_size INT, max_id INT, flter TEXT) AS $$
+      DECLARE 
+        last_max INT;
+      BEGIN
+        last_max := 1 + chunk_size;
+        FOR i IN 1..max_id BY chunk_size 
+        LOOP
+          BEGIN
+            RAISE DEBUG 'INSERT INTO %_archive SELECT * FROM % WHERE id >= % AND id < % AND %', tbl, tbl, i, last_max, flter;
+            execute 'INSERT INTO ' || tbl || '_archive SELECT * FROM ' || tbl || ' WHERE id >= ' || i || 'AND id < ' || last_max || ' AND ' || flter;
+          END;
+          last_max := last_max + chunk_size;
+        END LOOP;
+      END
+    $$ LANGUAGE plpgsql;
+    """,
+    []
+  )
+```
+
+<!-- livebook:{"attrs":{"cache_query":true,"connection":{"type":"postgres","variable":"conn"},"data_frame_alias":"Elixir.Explorer.DataFrame","query":"CREATE TABLE new_archive (LIKE new);","result_variable":"result2","timeout":null},"chunks":null,"kind":"Elixir.KinoDB.SQLCell","livebook_object":"smart_cell"} -->
+
+```elixir
+result2 = Postgrex.query!(conn, "CREATE TABLE new_archive (LIKE new);", [])
+```
